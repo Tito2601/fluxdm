@@ -1,0 +1,9 @@
+{
+  "name": "com.fluxdm.host",
+  "description": "FluxDM native messaging host (Firefox)",
+  "path": "PLACEHOLDER_PATH_TO_FLUXDM_BINARY",
+  "type": "stdio",
+  "allowed_extensions": [
+    "fluxdm@fluxdev.app"
+  ]
+}

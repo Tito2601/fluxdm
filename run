@@ -1,0 +1,101 @@
+Starting & Testing FluxDM
+
+  Step 1 — Run the desktop app
+
+  Open a PowerShell terminal and run:
+
+  $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64;$env:PATH"
+  Set-Location "C:\projects\FluxDM"
+  cargo tauri dev
+
+  This compiles Rust + starts Vite, then opens the app window. First build takes ~2 min; subsequent hot-reloads are fast.
+
+  ---
+  Step 2 — Verify the HTTP server is up
+
+  Once the app is running, open a second PowerShell and test the extension bridge:
+
+  # Health check
+  Invoke-RestMethod http://127.0.0.1:54321/status
+  # → { running: True, name: FluxDM, version: 0.1.0 }
+
+  # Send a test download
+  Invoke-RestMethod http://127.0.0.1:54321/add -Method POST `
+    -ContentType "application/json" `
+    -Body '{"url":"https://speed.hetzner.de/100MB.bin","filename":"test100mb.bin"}'
+  # → { success: True, id: "some-uuid" }
+
+  The download should appear in the app's Downloads tab immediately.
+
+  ---
+  Step 3 — Load the Chrome extension
+
+  1. Open Chrome → chrome://extensions
+  2. Enable Developer mode (top-right toggle)
+  3. Click Load unpacked
+  4. Select C:\projects\FluxDM\extension
+
+  The FluxDM ⚡ icon appears in your toolbar. Click it — the popup should show a green dot ("FluxDM is running") since the app is open.
+
+  ---
+  Step 4 — Test the extension
+
+  Popup manual download:
+  1. Click the ⚡ toolbar icon
+  2. Paste https://speed.hetzner.de/100MB.bin in the URL box
+  3. Click Send to FluxDM → check the app's Downloads tab
+
+  Right-click a link:
+  1. Right-click any .zip, .exe, .mp4 etc. link on any page
+  2. Select "⬇ Download with FluxDM"
+
+  Auto-intercept:
+  - Browse to a direct file URL (e.g. https://github.com/.../releases/download/.../setup.exe)
+  - Chrome's download dialog gets cancelled and FluxDM picks it up
+
+  ---
+  Step 5 — Build & install the native host (optional — for offline/native path)
+
+  The HTTP fallback works without this. The native host enables the browser ↔ binary direct path.
+
+  # Build the native host binary
+  $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64;$env:PATH"
+  Set-Location "C:\projects\FluxDM\src-tauri"
+  cargo build --release --bin fluxdm-host
+  # Output: src-tauri\target\release\fluxdm-host.exe
+
+  # Register it with Chrome (finds the binary automatically)
+  Set-Location "C:\projects\FluxDM"
+  .\extension\install.ps1
+
+  After install, the extension will try native messaging first (faster, survives app restarts), then fall back to HTTP.
+
+  ---
+  Step 6 — Run the Rust unit tests
+
+  $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64;$env:PATH"
+  Set-Location "C:\projects\FluxDM\src-tauri"
+  cargo test 2>&1
+
+  This runs the native messaging protocol round-trip tests in bridge/native_host.rs.
+
+  ---
+  Quick reference
+
+  ┌─────────────────────┬─────────────────────────────────────────────────────────┐
+  │        What         │                          Where                          │
+  ├─────────────────────┼─────────────────────────────────────────────────────────┤
+  │ Desktop app         │ cargo tauri dev from project root                       │
+  ├─────────────────────┼─────────────────────────────────────────────────────────┤
+  │ HTTP API            │ http://127.0.0.1:54321/status and /add                  │
+  ├─────────────────────┼─────────────────────────────────────────────────────────┤
+  │ Extension           │ chrome://extensions → Load unpacked → extension/        │
+  ├─────────────────────┼─────────────────────────────────────────────────────────┤
+  │ Native host binary  │ cargo build --release --bin fluxdm-host                 │
+  ├─────────────────────┼─────────────────────────────────────────────────────────┤
+  │ Native host install │ .\extension\install.ps1                                 │
+  ├─────────────────────┼─────────────────────────────────────────────────────────┤
+  │ Logs                │ Rust logs print to the terminal running cargo tauri dev │
+  └─────────────────────┴─────────────────────────────────────────────────────────┘
+
+✻ Brewed for 1m 15s

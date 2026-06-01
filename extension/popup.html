@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FluxDM</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 340px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: #020617;
+      border-bottom: 1px solid #1e293b;
+    }
+    .header-left { display: flex; align-items: center; gap: 8px; }
+    .logo  { font-size: 18px; }
+    .title { font-weight: 700; color: #60a5fa; letter-spacing: 0.05em; }
+    .subtitle { font-size: 11px; color: #475569; }
+
+    /* Status dot */
+    .status-row { display: flex; align-items: center; gap: 5px; }
+    .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot-green { background: #22c55e; box-shadow: 0 0 4px #22c55e88; }
+    .dot-red   { background: #ef4444; }
+    .dot-gray  { background: #475569; }
+    #statusText { font-size: 11px; color: #64748b; }
+
+    /* Body */
+    .body { padding: 16px; }
+    .field-label { font-size: 11px; color: #64748b; margin-bottom: 4px; }
+    .field-input {
+      width: 100%;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      color: #e2e8f0;
+      font-size: 12px;
+      padding: 8px 10px;
+      outline: none;
+      margin-bottom: 10px;
+    }
+    .field-input:focus { border-color: #3b82f6; }
+
+    .btn-primary {
+      width: 100%;
+      padding: 9px;
+      background: #2563eb;
+      border: none;
+      border-radius: 6px;
+      color: white;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-primary:hover    { background: #1d4ed8; }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Status message */
+    .status {
+      margin-top: 10px;
+      padding: 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      text-align: center;
+      display: none;
+    }
+    .status.success { background: #14532d33; color: #4ade80; display: block; }
+    .status.error   { background: #7f1d1d33; color: #f87171; display: block; }
+
+    /* Footer */
+    .footer {
+      padding: 10px 16px;
+      background: #020617;
+      border-top: 1px solid #1e293b;
+      font-size: 10px;
+      color: #334155;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .footer a { color: #3b82f6; text-decoration: none; }
+    .footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="header-left">
+      <span class="logo">⚡</span>
+      <div>
+        <div class="title">FluxDM</div>
+        <div class="subtitle">Parallel Download Manager</div>
+      </div>
+    </div>
+    <div class="status-row">
+      <div id="statusDot" class="dot dot-gray"></div>
+      <span id="statusText">Checking…</span>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="field-label">Download URL</div>
+    <input
+      type="url"
+      id="urlInput"
+      class="field-input"
+      placeholder="https://example.com/file.zip"
+      autofocus
+    />
+
+    <div class="field-label">Filename <span style="color:#334155">(optional — auto-detected)</span></div>
+    <input
+      type="text"
+      id="filenameInput"
+      class="field-input"
+      placeholder="Auto-detected from URL"
+    />
+
+    <button id="downloadBtn" class="btn-primary">⬇ Send to FluxDM</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <div class="footer">
+    <span>Right-click any link → <em>Download with FluxDM</em></span>
+    <span>v1.0.0</span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

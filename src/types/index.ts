@@ -1,0 +1,225 @@
+// ============================================================
+// FluxDM Shared TypeScript Types
+// ============================================================
+
+export type DownloadStatus =
+  | "queued"
+  | "downloading"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface Download {
+  id: string;
+  url: string;
+  filename: string;
+  savePath: string;
+  totalBytes: number;
+  downloaded: number;
+  status: DownloadStatus;
+  speedBps: number;
+  etaSeconds: number;
+  category: string;
+  threatScore: number; // 0-100; show warning badge if > 60
+  mimeType?: string;
+  checksum?: string;
+  sourceUrl?: string;
+  referrer?: string;
+  numSegments: number;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface ProgressEvent {
+  id: string;
+  downloadedBytes: number;
+  totalBytes: number;
+  speedBps: number;
+  etaSeconds: number;
+}
+
+export interface CompleteEvent {
+  id: string;
+  savePath: string;
+  checksum: string;
+}
+
+export interface ErrorEvent {
+  id: string;
+  error: string;
+}
+
+export interface AnalyticsData {
+  totalDownloadedBytes: number;
+  downloadsToday: number;
+  avgSpeedBps: number;
+  downloadsByCategory: Record<string, number>;
+  speedHistory: SpeedDataPoint[];
+}
+
+export interface SpeedDataPoint {
+  timestamp: number;
+  speedBps: number;
+}
+
+export interface Settings {
+  maxParallelDownloads: number;
+  maxSegmentsPerDownload: number;
+  defaultSavePath: string;
+  speedLimitKbps: number;
+  enableScheduler: boolean;
+  schedulerStart: string;
+  schedulerStop: string;
+  zeroLogMode: boolean;
+  theme: "light" | "dark" | "system";
+  // LLM settings (Phase 6)
+  llmEnabled: boolean;
+  llmEndpoint: string;
+  llmModel: string;
+}
+
+// ── AI types ──────────────────────────────────────────────────────────────────
+
+export interface ThreatFactor {
+  name:   string;
+  delta:  number;  // positive = more risky, negative = safer
+  reason: string;
+}
+
+export interface ThreatAnalysis {
+  score:   number;
+  factors: ThreatFactor[];
+}
+
+// ── Browser extension download request ────────────────────────────────────────
+
+/** Emitted by the HTTP server when the browser extension sends a download URL.
+ *  The UI opens the Add Download dialog pre-filled with these values so the
+ *  user can confirm / change the filename and save path before starting. */
+export interface DownloadRequest {
+  url:          string;
+  filename:     string;
+  savePath:     string;
+  mimeType?:    string;
+  referrer?:    string;
+  pageUrl?:     string;
+  threatScore?: number;
+  category?:    string;
+  fileSize?:    number;
+}
+
+// ── Stream types ───────────────────────────────────────────────────────────────
+
+export interface StreamQuality {
+  index: number;
+  label: string;
+  bandwidth: number;
+  resolution?: string;
+  codecs?: string;
+  /** HLS: media playlist URL. DASH: MPD URL (same for all qualities). */
+  url: string;
+  /** DASH-only: representation ID. */
+  reprId?: string;
+}
+
+export interface StreamInfo {
+  /** `"hls"` | `"dash"` | `"direct"` (plain file, not a stream). */
+  streamType: string;
+  qualities: StreamQuality[];
+  durationSeconds?: number;
+  title?: string;
+}
+
+export interface DuplicateCheck {
+  isUrlDuplicate:       boolean;
+  previousFilename?:    string;
+  previousSavePath?:    string;
+  previousCompletedAt?: string;
+  fileExists:           boolean;
+  outputPath:           string;
+}
+
+export type FileCategory =
+  | "videos"
+  | "music"
+  | "documents"
+  | "software"
+  | "images"
+  | "archives"
+  | "other";
+
+export const CATEGORY_ICONS: Record<string, string> = {
+  videos: "🎬",
+  music: "🎵",
+  documents: "📄",
+  software: "💿",
+  images: "🖼️",
+  archives: "📦",
+  other: "📎",
+};
+
+export const CATEGORY_COLORS: Record<string, string> = {
+  videos: "#ef4444",
+  music: "#a855f7",
+  documents: "#3b82f6",
+  software: "#22c55e",
+  images: "#f97316",
+  archives: "#eab308",
+  other: "#6b7280",
+};
+
+// Utility: format bytes to human-readable
+export function formatBytes(bytes: number): string {
+  if (!bytes || !isFinite(bytes) || bytes <= 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
+// Utility: format speed
+export function formatSpeed(bps: number): string {
+  if (!bps || !isFinite(bps) || bps <= 0) return "—";
+  return `${formatBytes(bps)}/s`;
+}
+
+// Utility: format ETA
+export function formatEta(seconds: number): string {
+  if (seconds <= 0 || !isFinite(seconds)) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    return `${m}m ${s}s`;
+  }
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+// Utility: convert raw Rust DownloadJob to Download type
+export function normalizeDownload(raw: Record<string, unknown>): Download {
+  return {
+    id: raw.id as string,
+    url: raw.url as string,
+    filename: raw.filename as string,
+    savePath: raw.save_path as string,
+    totalBytes: (raw.total_bytes as number) ?? 0,
+    downloaded: (raw.downloaded as number) ?? 0,
+    status: (raw.status as DownloadStatus) ?? "queued",
+    speedBps: (raw.speed_bps as number) ?? 0,
+    etaSeconds: 0,
+    category: (raw.category as string) ?? "other",
+    threatScore: (raw.threat_score as number) ?? 0,
+    mimeType: raw.mime_type as string | undefined,
+    checksum: raw.checksum as string | undefined,
+    sourceUrl: raw.source_url as string | undefined,
+    referrer: raw.referrer as string | undefined,
+    numSegments: (raw.num_segments as number) ?? 8,
+    createdAt: raw.created_at as string,
+    updatedAt: raw.updated_at as string,
+    completedAt: raw.completed_at as string | undefined,
+  };
+}

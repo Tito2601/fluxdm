@@ -1,0 +1,10 @@
+{
+  "_comment": "Template — the install scripts write the real manifest with the correct binary path.",
+  "name": "com.fluxdm.host",
+  "description": "FluxDM native messaging host — bridges browser extension to desktop app",
+  "path": "PLACEHOLDER — run extension/install.ps1 (Windows) or extension/install.sh (macOS/Linux)",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://YOUR_EXTENSION_ID_HERE/"
+  ]
+}
