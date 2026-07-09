@@ -13,11 +13,16 @@ mod tray;
 pub mod utils;
 
 use engine::queue::DownloadQueue;
+use engine::torrent::TorrentEngine;
 use storage::db::Database;
 
 /// Shared application state passed to all Tauri commands.
 pub type DbState = Arc<Mutex<Database>>;
 pub type QueueState = Arc<DownloadQueue>;
+pub type TorrentState = Arc<TorrentEngine>;
+
+/// Concurrency fallback when `max_parallel_downloads` is missing or unparseable.
+const DEFAULT_MAX_PARALLEL: usize = 3;
 
 pub fn run() {
     // Initialize tracing (logging)
@@ -33,6 +38,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // ── System tray ───────────────────────────────────────────────
             tray::setup_tray(app)?;
@@ -51,6 +57,22 @@ pub fn run() {
                 Err(e) => tracing::warn!("Could not reset interrupted downloads: {}", e),
             }
 
+            let max_parallel = db
+                .get_setting("max_parallel_downloads")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(DEFAULT_MAX_PARALLEL);
+
+            let torrent_dir = db
+                .get_setting("torrent_save_path")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "~/Downloads".to_string());
+
+            let speed_limit = db.get_setting(engine::throttle::SETTING_KEY).ok().flatten();
+
             let db: DbState = Arc::new(Mutex::new(db));
             app.manage(db.clone());
 
@@ -58,27 +80,69 @@ pub fn run() {
             let queue: QueueState = Arc::new(DownloadQueue::new());
             app.manage(queue.clone());
 
-            // ── Background queue processor ────────────────────────────────
-            let app_handle = app.handle().clone();
-            let db_clone = db.clone();
-            let queue_clone = queue.clone();
+            // The queue, the scheduler and every in-flight download share one
+            // set of stop signals.
+            let control = queue.control();
 
-            tauri::async_runtime::spawn(async move {
-                info!("Queue processor starting");
-                queue_clone
-                    .process_queue(app_handle, db_clone, 3)
-                    .await;
-            });
+            // ── BitTorrent session ────────────────────────────────────────
+            // Built synchronously: the Tauri commands need the managed state to
+            // exist before the first window can invoke them.
+            let torrent_dir = utils::expand_path(&torrent_dir);
+            let torrent: TorrentState = tauri::async_runtime::block_on(
+                TorrentEngine::new(std::path::PathBuf::from(&torrent_dir)),
+            )
+            .map_err(|e| {
+                tracing::error!("Failed to start BitTorrent session: {}", e);
+                e
+            })?;
+            app.manage(torrent.clone());
+
+            // Restore the saved rate limit before anything can start transferring.
+            engine::throttle::apply_from_settings(speed_limit.as_deref(), Some(&torrent));
+
+            // ── Background queue processor ────────────────────────────────
+            {
+                let app_handle = app.handle().clone();
+                let db         = db.clone();
+                let queue      = queue.clone();
+                tauri::async_runtime::spawn(async move {
+                    info!("Queue processor starting");
+                    queue.process_queue(app_handle, db, max_parallel).await;
+                });
+            }
+
+            // ── Scheduler ─────────────────────────────────────────────────
+            {
+                let app_handle = app.handle().clone();
+                let db         = db.clone();
+                let queue      = queue.clone();
+                tauri::async_runtime::spawn(async move {
+                    engine::scheduler::run_scheduler(app_handle, db, queue).await;
+                });
+            }
+
+            // ── Torrent stats poller ──────────────────────────────────────
+            {
+                let app_handle = app.handle().clone();
+                let db         = db.clone();
+                let torrent    = torrent.clone();
+                let control    = control.clone();
+                tauri::async_runtime::spawn(async move {
+                    engine::torrent::poll_torrents(app_handle, db, torrent, control).await;
+                });
+            }
 
             // ── Extension HTTP server ─────────────────────────────────────
             // Lets the browser extension (and native host) reach FluxDM at
             // http://127.0.0.1:54321  without needing native messaging.
-            let db_http     = db.clone();
-            let queue_http  = queue.clone();
-            let handle_http = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                server::start_http_server(db_http, queue_http, handle_http).await;
-            });
+            {
+                let db         = db.clone();
+                let queue      = queue.clone();
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    server::start_http_server(db, queue, app_handle).await;
+                });
+            }
 
             info!("FluxDM setup complete");
             Ok(())
@@ -102,6 +166,8 @@ pub fn run() {
             commands::cmd_add_stream_download,
             commands::cmd_test_llm,
             commands::cmd_llm_suggest_name,
+            commands::cmd_is_torrent_source,
+            commands::cmd_add_torrent,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FluxDM");

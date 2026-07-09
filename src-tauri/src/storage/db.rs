@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::engine::downloader::{DownloadJob, DownloadStatus};
+use crate::engine::downloader::{DownloadJob, DownloadKind, DownloadStatus};
 use crate::engine::segment::Segment;
 
 // ── Analytics ────────────────────────────────────────────────────────────────
@@ -60,6 +60,9 @@ impl Database {
         )?;
 
         let db = Self { conn };
+        // Migrate first: schema.sql indexes columns that older databases lack,
+        // so those columns must exist before the batch runs.
+        db.migrate()?;
         db.init_schema()?;
         Ok(db)
     }
@@ -71,6 +74,50 @@ impl Database {
             .context("Failed to initialize database schema")?;
         debug!("Database schema initialized");
         Ok(())
+    }
+
+    /// Bring an existing database up to the current schema.
+    ///
+    /// `schema.sql` uses `CREATE TABLE IF NOT EXISTS`, so columns added after a
+    /// user's database was first created would otherwise never appear. SQLite has
+    /// no `ADD COLUMN IF NOT EXISTS`, so check `PRAGMA table_info` first.
+    ///
+    /// Runs before `init_schema`, so on a fresh database there is nothing to
+    /// migrate — `schema.sql` will create the table with every column already.
+    fn migrate(&self) -> Result<()> {
+        const DOWNLOAD_COLUMNS: &[(&str, &str)] = &[
+            ("kind",             "TEXT DEFAULT 'http'"),
+            ("info_hash",        "TEXT"),
+            ("uploaded_bytes",   "INTEGER DEFAULT 0"),
+            ("upload_speed_bps", "INTEGER DEFAULT 0"),
+            ("peers_connected",  "INTEGER DEFAULT 0"),
+            ("peers_total",      "INTEGER DEFAULT 0"),
+        ];
+
+        let existing = self.column_names("downloads")?;
+        if existing.is_empty() {
+            debug!("No downloads table yet; skipping migration");
+            return Ok(());
+        }
+
+        for (name, decl) in DOWNLOAD_COLUMNS {
+            if !existing.iter().any(|c| c == name) {
+                info!("Migrating: adding downloads.{}", name);
+                self.conn
+                    .execute(&format!("ALTER TABLE downloads ADD COLUMN {} {}", name, decl), [])
+                    .with_context(|| format!("Failed to add column downloads.{}", name))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn column_names(&self, table: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({})", table))?;
+        let names = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(names)
     }
 
     // ── Downloads ─────────────────────────────────────────────────────────
@@ -85,12 +132,16 @@ impl Database {
                 id, url, filename, save_path, total_bytes, downloaded,
                 status, speed_bps, segments, category, threat_score,
                 source_url, referrer, mime_type, checksum,
-                created_at, updated_at, completed_at
+                created_at, updated_at, completed_at,
+                kind, info_hash, uploaded_bytes, upload_speed_bps,
+                peers_connected, peers_total
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18
+                ?16, ?17, ?18,
+                ?19, ?20, ?21, ?22,
+                ?23, ?24
             )",
             params![
                 job.id,
@@ -111,6 +162,12 @@ impl Database {
                 job.created_at,
                 now,
                 job.completed_at,
+                job.kind.as_str(),
+                job.info_hash,
+                job.uploaded_bytes as i64,
+                job.upload_speed_bps as i64,
+                job.peers_connected as i64,
+                job.peers_total as i64,
             ],
         )?;
         Ok(())
@@ -122,7 +179,9 @@ impl Database {
             "SELECT id, url, filename, save_path, total_bytes, downloaded,
                     status, speed_bps, segments, category, threat_score,
                     source_url, referrer, mime_type, checksum,
-                    created_at, updated_at, completed_at
+                    created_at, updated_at, completed_at,
+                    kind, info_hash, uploaded_bytes, upload_speed_bps,
+                    peers_connected, peers_total
              FROM downloads
              ORDER BY created_at DESC",
         )?;
@@ -130,6 +189,10 @@ impl Database {
         let rows = stmt.query_map([], |row| {
             let status_str: String = row.get(6)?;
             let status = DownloadStatus::from_str(&status_str);
+
+            // Rows written before the `kind` migration have NULL here.
+            let kind_str: Option<String> = row.get(18)?;
+            let kind = DownloadKind::from_str(kind_str.as_deref().unwrap_or("http"));
 
             Ok(DownloadJob {
                 id:           row.get(0)?,
@@ -150,6 +213,14 @@ impl Database {
                 created_at:   row.get(15)?,
                 updated_at:   row.get(16)?,
                 completed_at: row.get(17)?,
+
+                kind,
+                info_hash:        row.get(19)?,
+                uploaded_bytes:   row.get::<_, Option<i64>>(20)?.unwrap_or(0) as u64,
+                upload_speed_bps: row.get::<_, Option<i64>>(21)?.unwrap_or(0) as u64,
+                peers_connected:  row.get::<_, Option<i64>>(22)?.unwrap_or(0) as u32,
+                peers_total:      row.get::<_, Option<i64>>(23)?.unwrap_or(0) as u32,
+
                 segments:     Vec::new(), // loaded separately if needed
                 headers:      None,
                 cookies:      None,
@@ -166,6 +237,41 @@ impl Database {
         self.conn.execute(
             "UPDATE downloads SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![status, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Persist a torrent's live counters. Called on a timer by the torrent poller,
+    /// so it touches only the columns that actually change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_torrent_progress(
+        &self,
+        id:               &str,
+        downloaded:       u64,
+        total_bytes:      u64,
+        speed_bps:        u64,
+        uploaded_bytes:   u64,
+        upload_speed_bps: u64,
+        peers_connected:  u32,
+        peers_total:      u32,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE downloads SET
+                 downloaded = ?1, total_bytes = ?2, speed_bps = ?3,
+                 uploaded_bytes = ?4, upload_speed_bps = ?5,
+                 peers_connected = ?6, peers_total = ?7, updated_at = ?8
+             WHERE id = ?9",
+            params![
+                downloaded as i64,
+                total_bytes as i64,
+                speed_bps as i64,
+                uploaded_bytes as i64,
+                upload_speed_bps as i64,
+                peers_connected as i64,
+                peers_total as i64,
+                chrono::Utc::now().to_rfc3339(),
+                id,
+            ],
         )?;
         Ok(())
     }
@@ -195,14 +301,13 @@ impl Database {
                 _             => SegmentStatus::Pending,
             };
             Ok(Segment {
-                id:             row.get(0)?,
-                download_id:    row.get(1)?,
-                index_num:      row.get::<_, i64>(2)? as usize,
-                byte_start:     row.get::<_, i64>(3)? as u64,
-                byte_end:       row.get::<_, i64>(4)? as u64,
-                downloaded:     row.get::<_, i64>(5)? as u64,
+                id:          row.get(0)?,
+                download_id: row.get(1)?,
+                index_num:   row.get::<_, i64>(2)? as usize,
+                byte_start:  row.get::<_, i64>(3)? as u64,
+                byte_end:    row.get::<_, i64>(4)? as u64,
+                downloaded:  row.get::<_, i64>(5)? as u64,
                 status,
-                temp_file_path: None,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -234,6 +339,25 @@ impl Database {
                 segment.downloaded as i64,
                 status,
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Record how far a running segment has got.
+    ///
+    /// Segments write in place, so this row is the only record of their progress —
+    /// without it a crash mid-download would restart from zero. The row must
+    /// already exist; `multi_segment_download` inserts them before it starts.
+    pub fn update_segment_progress(
+        &self,
+        download_id: &str,
+        index_num: usize,
+        downloaded: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE segments SET downloaded = ?3
+             WHERE download_id = ?1 AND index_num = ?2",
+            params![download_id, index_num as i64, downloaded as i64],
         )?;
         Ok(())
     }
@@ -398,5 +522,86 @@ impl Database {
             downloads_by_category: by_category,
             speed_history,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `downloads` table as it shipped before the torrent engine existed.
+    const LEGACY_DOWNLOADS: &str = "CREATE TABLE downloads (
+        id           TEXT PRIMARY KEY,
+        url          TEXT NOT NULL,
+        filename     TEXT NOT NULL,
+        save_path    TEXT NOT NULL,
+        total_bytes  INTEGER DEFAULT 0,
+        downloaded   INTEGER DEFAULT 0,
+        status       TEXT DEFAULT 'queued',
+        speed_bps    INTEGER DEFAULT 0,
+        segments     INTEGER DEFAULT 8,
+        category     TEXT DEFAULT 'other',
+        threat_score INTEGER DEFAULT 0,
+        source_url   TEXT,
+        referrer     TEXT,
+        mime_type    TEXT,
+        checksum     TEXT,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        completed_at TEXT
+    );";
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fluxdm-test-{}-{}", tag, Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn opens_a_fresh_database() {
+        let dir = scratch_dir("fresh");
+        let db = Database::new(dir.clone()).expect("fresh open must succeed");
+        assert!(db.column_names("downloads").unwrap().iter().any(|c| c == "kind"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opening_twice_is_idempotent() {
+        let dir = scratch_dir("twice");
+        drop(Database::new(dir.clone()).expect("first open"));
+        Database::new(dir.clone()).expect("reopen must succeed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Regression: `schema.sql` indexes `downloads(kind)`, a column legacy
+    /// databases lack. Migration must add it before the index is created.
+    #[test]
+    fn upgrades_a_legacy_database() {
+        let dir = scratch_dir("legacy");
+        let conn = Connection::open(dir.join("fluxdm.db")).unwrap();
+        conn.execute_batch(LEGACY_DOWNLOADS).unwrap();
+        conn.execute(
+            "INSERT INTO downloads (id, url, filename, save_path, created_at, updated_at)
+             VALUES ('row1', 'http://e.test/f', 'f', '.', '2020-01-01', '2020-01-01')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Database::new(dir.clone()).expect("legacy open must succeed");
+
+        let cols = db.column_names("downloads").unwrap();
+        for expected in ["kind", "info_hash", "uploaded_bytes", "peers_total"] {
+            assert!(cols.iter().any(|c| c == expected), "missing {}", expected);
+        }
+
+        // The pre-existing row survives and gets the default engine kind.
+        let kind: String = db
+            .conn
+            .query_row("SELECT kind FROM downloads WHERE id = 'row1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "http");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

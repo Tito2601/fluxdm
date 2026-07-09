@@ -3,13 +3,16 @@ use tauri::{Emitter, State};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
-use crate::engine::downloader::DownloadJob;
+use crate::engine::downloader::{DownloadJob, DownloadKind};
 use crate::engine::queue::DownloadQueue;
+use crate::engine::throttle;
+use crate::engine::torrent::TorrentEngine;
 use crate::storage::db::{AnalyticsData, Database};
 
 // ── Type aliases for cleaner signatures ───────────────────────────────────────
 type Db<'a> = State<'a, Arc<Mutex<Database>>>;
 type Queue<'a> = State<'a, Arc<DownloadQueue>>;
+type Torrent<'a> = State<'a, Arc<TorrentEngine>>;
 
 // ── Add a new download ────────────────────────────────────────────────────────
 
@@ -45,16 +48,41 @@ pub async fn cmd_add_download(
 // ── Pause / Resume / Cancel / Delete ─────────────────────────────────────────
 
 #[tauri::command]
-pub async fn cmd_pause_download(id: String, db: Db<'_>, queue: Queue<'_>) -> Result<(), String> {
+pub async fn cmd_pause_download(
+    id:      String,
+    db:      Db<'_>,
+    queue:   Queue<'_>,
+    torrent: Torrent<'_>,
+) -> Result<(), String> {
+    // Always set the shared paused flag: the torrent poller reads it to tell a
+    // user-paused torrent from one the scheduler paused.
     queue.pause(&id).await;
+
+    if torrent.manages(&id).await {
+        torrent.pause(&id).await.map_err(|e| e.to_string())?;
+    }
+
     db.lock().await
         .update_download_status(&id, "paused")
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn cmd_resume_download(id: String, db: Db<'_>, queue: Queue<'_>) -> Result<(), String> {
+pub async fn cmd_resume_download(
+    id:      String,
+    db:      Db<'_>,
+    queue:   Queue<'_>,
+    torrent: Torrent<'_>,
+) -> Result<(), String> {
     queue.resume(&id).await;
+
+    // A torrent is owned by the swarm session, not the queue — resume it in place.
+    if torrent.manages(&id).await {
+        torrent.resume(&id).await.map_err(|e| e.to_string())?;
+        return db.lock().await
+            .update_download_status(&id, "downloading")
+            .map_err(|e| e.to_string());
+    }
 
     let db_lock = db.lock().await;
 
@@ -72,8 +100,19 @@ pub async fn cmd_resume_download(id: String, db: Db<'_>, queue: Queue<'_>) -> Re
 }
 
 #[tauri::command]
-pub async fn cmd_cancel_download(id: String, db: Db<'_>, queue: Queue<'_>) -> Result<(), String> {
+pub async fn cmd_cancel_download(
+    id:      String,
+    db:      Db<'_>,
+    queue:   Queue<'_>,
+    torrent: Torrent<'_>,
+) -> Result<(), String> {
     queue.cancel(&id).await;
+
+    if torrent.manages(&id).await {
+        // Leave the partial data on disk; `cmd_delete_download` is what erases it.
+        torrent.remove(&id, false).await.map_err(|e| e.to_string())?;
+    }
+
     db.lock().await
         .update_download_status(&id, "cancelled")
         .map_err(|e| e.to_string())
@@ -84,26 +123,32 @@ pub async fn cmd_delete_download(
     id:          String,
     delete_file: bool,
     db:          Db<'_>,
+    queue:       Queue<'_>,
+    torrent:     Torrent<'_>,
 ) -> Result<(), String> {
+    queue.cancel(&id).await;
+
+    // The session owns the torrent's files, so it must do the deleting.
+    if torrent.manages(&id).await {
+        torrent.remove(&id, delete_file).await.map_err(|e| e.to_string())?;
+        return db.lock().await.delete_download(&id).map_err(|e| e.to_string());
+    }
+
+    let db_lock = db.lock().await;
+
     // Optionally delete the actual file from disk
     if delete_file {
-        let db_lock = db.lock().await;
         if let Ok(downloads) = db_lock.get_all_downloads() {
             if let Some(job) = downloads.iter().find(|d| d.id == id) {
-                let path = format!("{}/{}", job.save_path, job.filename);
+                let path = format!("{}/{}", crate::utils::expand_path(&job.save_path), job.filename);
                 if std::path::Path::new(&path).exists() {
                     let _ = std::fs::remove_file(&path);
                 }
             }
         }
-        db_lock.delete_download(&id).map_err(|e| e.to_string())?;
-    } else {
-        db.lock().await
-            .delete_download(&id)
-            .map_err(|e| e.to_string())?;
     }
 
-    Ok(())
+    db_lock.delete_download(&id).map_err(|e| e.to_string())
 }
 
 // ── Read downloads ────────────────────────────────────────────────────────────
@@ -128,13 +173,22 @@ pub async fn cmd_get_settings(
 
 #[tauri::command]
 pub async fn cmd_update_setting(
-    key:   String,
-    value: String,
-    db:    Db<'_>,
+    key:     String,
+    value:   String,
+    db:      Db<'_>,
+    torrent: Torrent<'_>,
 ) -> Result<(), String> {
     db.lock().await
         .update_setting(&key, &value)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // The rate limit lives in memory as well as the database; a change has to
+    // reach the running transfers, not just the next launch.
+    if key == throttle::SETTING_KEY {
+        throttle::apply_from_settings(Some(&value), Some(torrent.inner()));
+    }
+
+    Ok(())
 }
 
 // ── File system ───────────────────────────────────────────────────────────────
@@ -297,6 +351,65 @@ pub async fn cmd_llm_suggest_name(
     .ok_or_else(|| "LLM did not return a usable suggestion (is it running?)".into())
 }
 
+// ── Torrent ───────────────────────────────────────────────────────────────────
+
+/// Does this look like a magnet link or a `.torrent` file?
+/// Lets the Add dialog switch modes before the user commits.
+#[tauri::command]
+pub async fn cmd_is_torrent_source(source: String) -> Result<bool, String> {
+    Ok(crate::engine::torrent::is_torrent_source(&source))
+}
+
+/// Add a magnet link, a remote `.torrent` URL, or a local `.torrent` file.
+///
+/// Waits for swarm metadata before returning, so the row appears in the UI with
+/// its real name and size instead of a placeholder. For a magnet link on a cold
+/// DHT this can take several seconds.
+#[tauri::command]
+pub async fn cmd_add_torrent(
+    source:    String,
+    save_path: String,
+    app:       tauri::AppHandle,
+    db:        Db<'_>,
+    torrent:   Torrent<'_>,
+) -> Result<String, String> {
+    info!("cmd_add_torrent: {}", source);
+
+    let save_path = if save_path.trim().is_empty() {
+        db.lock().await
+            .get_setting("torrent_save_path")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "~/Downloads".to_string())
+    } else {
+        save_path
+    };
+    let output_dir = crate::utils::expand_path(&save_path);
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+
+    let added = torrent
+        .add(&job_id, &source, &output_dir)
+        .await
+        .map_err(|e| { error!("Torrent add failed: {}", e); e.to_string() })?;
+
+    let mut job = DownloadJob::new(source, added.name.clone(), output_dir, None, None);
+    job.id          = job_id.clone();
+    job.kind        = DownloadKind::Torrent;
+    job.info_hash   = Some(added.info_hash);
+    job.total_bytes = added.total_bytes;
+    job.status      = crate::engine::downloader::DownloadStatus::Downloading;
+    job.category    = crate::ai::categorizer::categorize_download("", &added.name, "");
+
+    db.lock().await
+        .upsert_download(&job)
+        .map_err(|e| { error!("DB error: {}", e); e.to_string() })?;
+
+    app.emit("download_added", &job).map_err(|e| e.to_string())?;
+
+    Ok(job_id)
+}
+
 // ── Stream: probe ─────────────────────────────────────────────────────────────
 
 /// Fetch `url` and return stream type + available quality variants.
@@ -349,6 +462,7 @@ pub async fn cmd_add_stream_download(
         None,
     );
     job.category = "videos".to_string(); // streams are always video content
+    job.kind     = DownloadKind::Stream;
 
     let id = job.id.clone();
 

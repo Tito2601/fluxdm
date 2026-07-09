@@ -4,6 +4,7 @@ use tauri::AppHandle;
 use tokio::sync::Mutex;
 use tracing::info;
 
+use crate::engine::control::DownloadControl;
 use crate::engine::downloader::{start_download, DownloadJob};
 use crate::storage::db::Database;
 
@@ -14,56 +15,56 @@ use crate::storage::db::Database;
 /// `active` is an `Arc<Mutex<...>>` so tasks spawned for each download
 /// can hold their own clone and remove themselves when finished.
 pub struct DownloadQueue {
-    queue:     Mutex<VecDeque<DownloadJob>>,
-    active:    Arc<Mutex<Vec<String>>>,  // Arc enables cloning into spawned tasks
-    paused:    Mutex<Vec<String>>,
-    cancelled: Mutex<Vec<String>>,
+    queue:   Mutex<VecDeque<DownloadJob>>,
+    active:  Arc<Mutex<Vec<String>>>, // Arc enables cloning into spawned tasks
+    control: Arc<DownloadControl>,
 }
 
 impl DownloadQueue {
     pub fn new() -> Self {
         Self {
-            queue:     Mutex::new(VecDeque::new()),
-            active:    Arc::new(Mutex::new(Vec::new())),
-            paused:    Mutex::new(Vec::new()),
-            cancelled: Mutex::new(Vec::new()),
+            queue:   Mutex::new(VecDeque::new()),
+            active:  Arc::new(Mutex::new(Vec::new())),
+            control: Arc::new(DownloadControl::new()),
         }
+    }
+
+    /// Shared stop-signal handle, also held by the scheduler and by in-flight downloads.
+    pub fn control(&self) -> Arc<DownloadControl> {
+        Arc::clone(&self.control)
     }
 
     // ── Mutations ─────────────────────────────────────────────────────────
 
     /// Push a new job onto the back of the queue.
     pub async fn enqueue(&self, job: DownloadJob) {
+        // A job that was cancelled or paused earlier must not inherit those
+        // signals when it is deliberately started again.
+        self.control.unpause(&job.id);
+
         let mut q = self.queue.lock().await;
         info!("Enqueued '{}' (queue size now {})", job.filename, q.len() + 1);
         q.push_back(job);
     }
 
-    /// Signal a job to pause; the download loop checks this flag.
+    /// Signal a job to pause. A running transfer notices between chunks and stops;
+    /// a queued one is dropped from the pending list (`cmd_resume_download`
+    /// reloads it from the DB).
     pub async fn pause(&self, id: &str) {
-        let mut p = self.paused.lock().await;
-        if !p.iter().any(|x| x == id) {
-            p.push(id.to_string());
-            info!("Paused job {}", id);
-        }
+        self.control.pause(id);
+        self.queue.lock().await.retain(|j| j.id != id);
+        info!("Paused job {}", id);
     }
 
-    /// Remove a job from the paused list (re-enables download).
+    /// Clear the paused flag. The caller re-enqueues the job.
     pub async fn resume(&self, id: &str) {
-        let mut p = self.paused.lock().await;
-        p.retain(|x| x != id);
+        self.control.unpause(id);
         info!("Resumed job {}", id);
     }
 
     /// Cancel a queued (not yet started) or active job.
     pub async fn cancel(&self, id: &str) {
-        {
-            let mut c = self.cancelled.lock().await;
-            if !c.iter().any(|x| x == id) {
-                c.push(id.to_string());
-            }
-        }
-        // Also remove from pending queue if it hasn't started yet
+        self.control.cancel(id);
         self.queue.lock().await.retain(|j| j.id != id);
         info!("Cancelled job {}", id);
     }
@@ -84,8 +85,13 @@ impl DownloadQueue {
         self.active.lock().await.len()
     }
 
+    /// IDs of the downloads currently transferring.
+    pub async fn active_ids(&self) -> Vec<String> {
+        self.active.lock().await.clone()
+    }
+
     pub async fn is_cancelled(&self, id: &str) -> bool {
-        self.cancelled.lock().await.iter().any(|x| x == id)
+        self.control.is_cancelled(id)
     }
 
     // ── Main loop ─────────────────────────────────────────────────────────
@@ -101,16 +107,19 @@ impl DownloadQueue {
         info!("Queue processor started (max_parallel={})", max_parallel);
 
         loop {
+            // The scheduler may forbid starting anything right now. Jobs stay
+            // queued in order; nothing is lost.
+            let gate_open    = self.control.gate_open();
             let active_count = self.active_count().await;
 
-            if active_count < max_parallel {
+            if gate_open && active_count < max_parallel {
                 // Try to dequeue the next non-cancelled job
                 let job = {
                     let mut q = self.queue.lock().await;
                     loop {
                         match q.pop_front() {
                             None => break None,
-                            Some(j) if self.is_cancelled(&j.id).await => {
+                            Some(j) if self.control.is_cancelled(&j.id) => {
                                 info!("Skipping cancelled job {}", j.id);
                                 continue;
                             }
@@ -123,6 +132,7 @@ impl DownloadQueue {
                     let job_id     = job.id.clone();
                     let app_handle = app_handle.clone();
                     let db_clone   = db.clone();
+                    let control    = self.control();
 
                     // Mark as active before spawning
                     self.active.lock().await.push(job_id.clone());
@@ -132,7 +142,7 @@ impl DownloadQueue {
                     let id_for_cleanup = job_id.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = start_download(job, app_handle, db_clone).await {
+                        if let Err(e) = start_download(job, app_handle, db_clone, control).await {
                             tracing::error!("Download task error: {}", e);
                         }
                         // Remove from active list when done
@@ -145,5 +155,11 @@ impl DownloadQueue {
             // Poll every 200ms — light on CPU, responsive to new jobs
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
+    }
+}
+
+impl Default for DownloadQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }

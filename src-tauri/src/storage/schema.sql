@@ -21,10 +21,20 @@ CREATE TABLE IF NOT EXISTS downloads (
     checksum     TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
-    completed_at TEXT
+    completed_at TEXT,
+
+    -- Engine that owns this row: http | stream | torrent
+    kind             TEXT    DEFAULT 'http',
+    -- Torrent-only; zero / NULL for every other kind.
+    info_hash        TEXT,
+    uploaded_bytes   INTEGER DEFAULT 0,
+    upload_speed_bps INTEGER DEFAULT 0,
+    peers_connected  INTEGER DEFAULT 0,
+    peers_total      INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_downloads_status     ON downloads(status);
+CREATE INDEX IF NOT EXISTS idx_downloads_kind       ON downloads(kind);
 CREATE INDEX IF NOT EXISTS idx_downloads_created_at ON downloads(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_downloads_category   ON downloads(category);
 
@@ -77,8 +87,17 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('max_segments_per_download','8'),
     ('default_save_path',        '~/Downloads'),
     ('speed_limit_kbps',         '0'),
-    ('enable_scheduler',         'false'),
-    ('scheduler_start',          '02:00'),
-    ('scheduler_stop',           '07:00'),
     ('zero_log_mode',            'false'),
-    ('theme',                    'system');
+    ('theme',                    'system'),
+
+    -- Scheduler: each guard is independent of the others.
+    ('enable_scheduler',               'false'),
+    ('scheduler_start',                '02:00'),
+    ('scheduler_stop',                 '07:00'),
+    ('scheduler_pause_on_high_cpu',    'false'),
+    ('scheduler_cpu_threshold',        '80'),
+    ('scheduler_pause_on_low_battery', 'false'),
+    ('scheduler_battery_threshold',    '20'),
+
+    -- Torrent engine
+    ('torrent_save_path',  '~/Downloads');

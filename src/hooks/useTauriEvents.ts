@@ -6,7 +6,13 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { useDownloadStore } from "../store/downloadStore";
-import { DownloadRequest, ProgressEvent, CompleteEvent, ErrorEvent } from "../types";
+import {
+  DownloadRequest,
+  ProgressEvent,
+  CompleteEvent,
+  ErrorEvent,
+  SchedulerState,
+} from "../types";
 
 /** Request notification permission once, return whether it was granted. */
 async function ensureNotificationPermission(): Promise<boolean> {
@@ -28,6 +34,9 @@ export function useTauriEvents() {
     addDownloadFromEvent,
     markCompleted,
     markFailed,
+    markPaused,
+    markCancelled,
+    setScheduler,
     setPendingDownload,
   } = useDownloadStore();
 
@@ -86,10 +95,34 @@ export function useTauriEvents() {
       }
     }).then((fn) => unlisten.push(fn));
 
+    // The engine stopped a transfer of its own accord — a user pause, or the
+    // scheduler closing the gate. Partial bytes are kept for resume.
+    listen<{ id: string }>("download_paused", (event) => {
+      markPaused(event.payload.id);
+    }).then((fn) => unlisten.push(fn));
+
+    listen<{ id: string }>("download_cancelled", (event) => {
+      markCancelled(event.payload.id);
+    }).then((fn) => unlisten.push(fn));
+
+    // Scheduler opened or closed the download gate.
+    listen<SchedulerState>("scheduler_state", (event) => {
+      setScheduler(event.payload);
+    }).then((fn) => unlisten.push(fn));
+
     // Cleanup listeners on unmount
     return () => {
       unlisten.forEach((fn) => fn());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [updateProgress, addDownloadFromEvent, markCompleted, markFailed, setPendingDownload]);
+  }, [
+    updateProgress,
+    addDownloadFromEvent,
+    markCompleted,
+    markFailed,
+    markPaused,
+    markCancelled,
+    setScheduler,
+    setPendingDownload,
+  ]);
 }

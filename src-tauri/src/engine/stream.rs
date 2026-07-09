@@ -17,6 +17,8 @@ use tracing::{error, info, warn};
 
 use crate::engine::downloader::{DownloadJob, DownloadStatus, ProgressEvent};
 use crate::engine::hls::{self, M3u8};
+use crate::engine::http;
+use crate::engine::throttle;
 use crate::engine::dash;
 use crate::storage::db::Database;
 use crate::utils::{ensure_parent_dir, expand_path};
@@ -56,12 +58,13 @@ pub struct StreamInfo {
 /// Fetch `url` and determine whether it is an HLS or DASH stream.
 /// Returns the quality list so the UI can show a picker.
 pub async fn probe_stream(url: &str) -> Result<StreamInfo> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .user_agent("FluxDM/0.1")
-        .build()?;
+    let client = http::client();
 
-    let response = client.get(url).send().await?;
+    let response = client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await?;
 
     let content_type = response
         .headers()
@@ -258,13 +261,14 @@ async fn download_hls(
     out_path:   &str,
     app_handle: &AppHandle,
 ) -> Result<u64> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .user_agent("FluxDM/0.1")
-        .build()?;
+    let client = http::client();
 
     // Fetch the media playlist
-    let response = client.get(&job.url).send().await?;
+    let response = client
+        .get(&job.url)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await?;
     let content  = response.text().await?;
 
     let segments = match hls::parse_m3u8(&content, &job.url).map_err(|e| anyhow::anyhow!(e))? {
@@ -295,6 +299,7 @@ async fn download_hls(
         let mut resp = client.get(&seg.url).send().await?;
 
         while let Some(chunk) = resp.chunk().await? {
+            throttle::consume(chunk.len() as u64).await;
             out.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
         }
@@ -308,13 +313,10 @@ async fn download_hls(
         job.speed_bps  = speed;
         job.total_bytes = job.total_bytes.max(downloaded); // update as we go
 
-        app_handle.emit("download_progress", ProgressEvent {
-            id:               job.id.clone(),
-            downloaded_bytes: downloaded,
-            total_bytes:      job.total_bytes,
-            speed_bps:        speed,
-            eta_seconds:      eta,
-        }).ok();
+        app_handle.emit(
+            "download_progress",
+            ProgressEvent::plain(job.id.clone(), downloaded, job.total_bytes, speed, eta),
+        ).ok();
     }
 
     out.flush().await?;
@@ -329,13 +331,14 @@ async fn download_dash(
     out_path:   &str,
     app_handle: &AppHandle,
 ) -> Result<u64> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .user_agent("FluxDM/0.1")
-        .build()?;
+    let client = http::client();
 
     // Fetch the MPD manifest
-    let response = client.get(&job.url).send().await?;
+    let response = client
+        .get(&job.url)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await?;
     let content  = response.text().await?;
     let streams  = dash::parse_mpd(&content, &job.url).map_err(|e| anyhow::anyhow!(e))?;
 
@@ -370,6 +373,7 @@ async fn download_dash(
     if let Some(url) = &init_url {
         let mut resp = client.get(url).send().await?;
         while let Some(chunk) = resp.chunk().await? {
+            throttle::consume(chunk.len() as u64).await;
             out.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
         }
@@ -388,6 +392,7 @@ async fn download_dash(
 
         let mut resp = resp;
         while let Some(chunk) = resp.chunk().await? {
+            throttle::consume(chunk.len() as u64).await;
             out.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
         }
@@ -402,13 +407,10 @@ async fn download_dash(
         job.speed_bps   = speed;
         job.total_bytes = job.total_bytes.max(downloaded);
 
-        app_handle.emit("download_progress", ProgressEvent {
-            id:               job.id.clone(),
-            downloaded_bytes: downloaded,
-            total_bytes:      job.total_bytes,
-            speed_bps:        speed,
-            eta_seconds:      eta,
-        }).ok();
+        app_handle.emit(
+            "download_progress",
+            ProgressEvent::plain(job.id.clone(), downloaded, job.total_bytes, speed, eta),
+        ).ok();
     }
 
     out.flush().await?;

@@ -1,6 +1,6 @@
 # ⚡ FluxDM — Modern Parallel Download Manager
 
-> **Faster than IDM** — AI-powered, privacy-first, cross-platform.
+> Fast, AI-assisted, privacy-first, cross-platform.
 
 Built with **Tauri 2 + Rust + React 18 + TypeScript**.
 
@@ -10,16 +10,18 @@ Built with **Tauri 2 + Rust + React 18 + TypeScript**.
 
 | Feature | Status |
 |---|---|
-| Multi-segment parallel HTTP download | ✅ Phase 1 |
-| SQLite download history + queue | ✅ Phase 1 |
-| AI file categorization (rule-based) | ✅ Phase 1 |
-| Threat scoring + risk badges | ✅ Phase 1 |
-| Smart filename cleaner | ✅ Phase 1 |
-| React UI (dark theme, analytics) | ✅ Phase 1 |
-| Browser extension (Chrome/Firefox) | 🔧 Phase 3 |
-| HLS/DASH stream downloader | 📅 Phase 5 |
-| System tray + notifications | 📅 Phase 6 |
-| LLM-powered renaming (local Phi-3) | 📅 Phase 6 |
+| Multi-segment parallel HTTP download | ✅ |
+| Pause / resume with on-disk segment recovery | ✅ |
+| SQLite download history + queue | ✅ |
+| AI file categorization (rule-based) | ✅ |
+| Threat scoring + per-factor risk breakdown | ✅ |
+| Smart filename cleaner | ✅ |
+| Browser extension (Chrome/Firefox) + native host | ✅ |
+| HLS/DASH stream downloader | ✅ |
+| System tray + desktop notifications | ✅ |
+| LLM-powered renaming (local model) | ✅ |
+| **BitTorrent — magnet links and `.torrent` files** | ✅ |
+| **Scheduler — time window, CPU load, battery guards** | ✅ |
 
 ---
 
@@ -36,33 +38,50 @@ Built with **Tauri 2 + Rust + React 18 + TypeScript**.
 ### Setup
 
 ```powershell
-# 1. Install Node dependencies
 npm install
-
-# 2. Generate app icons (required for first build)
-#    Provide any 1024×1024 PNG as the source:
-cargo tauri icon assets/icon.png
-
-# 3. Development mode (hot-reload)
-cargo tauri dev
-
-# 4. Production build
-cargo tauri build
+cargo tauri dev      # development, hot-reload
+cargo tauri build    # production build
 ```
 
-### Without Icons (Quick Dev Test)
+> **Windows note:** Git ships a `link.exe` that shadows the MSVC linker. If `cargo`
+> fails at the link step, prepend the MSVC toolchain to `PATH` or build from a
+> Visual Studio Developer Prompt.
 
-If you don't have an icon yet, create a blank 32×32 PNG placeholder:
+---
 
-```powershell
-# Using PowerShell + .NET to generate a minimal PNG
-Add-Type -AssemblyName System.Drawing
-$bmp = New-Object System.Drawing.Bitmap 32, 32
-$bmp.Save("src-tauri\icons\32x32.png", [System.Drawing.Imaging.ImageFormat]::Png)
-$bmp128 = New-Object System.Drawing.Bitmap 128, 128
-$bmp128.Save("src-tauri\icons\128x128.png", [System.Drawing.Imaging.ImageFormat]::Png)
-$bmp128.Save("src-tauri\icons\128x128@2x.png", [System.Drawing.Imaging.ImageFormat]::Png)
-```
+## Torrents
+
+Paste a magnet link or pick a `.torrent` file. FluxDM waits for swarm metadata
+before the row appears, so it shows the real name and size rather than a placeholder.
+
+Torrents deliberately bypass the HTTP queue. A swarm spends most of its time
+waiting on peers rather than saturating a connection, so counting torrents against
+`max_parallel_downloads` would starve ordinary downloads for no benefit.
+
+A completed torrent keeps **seeding** until you remove it — the UI shows this as a
+distinct state, with upload speed, uploaded bytes, and share ratio. Peer counts are
+reported as *connected* and *discovered*; the underlying engine does not distinguish
+seeders from leechers, so FluxDM does not invent that number.
+
+---
+
+## Scheduler
+
+Three guards, each independent, any of which can hold downloads:
+
+| Guard | Behaviour |
+|---|---|
+| **Time window** | Only download between a start and stop time. A window whose stop precedes its start (e.g. `22:00 → 06:00`) wraps past midnight. |
+| **CPU load** | Hold while system CPU is above a threshold. |
+| **Battery** | Hold below a charge threshold. Ignored while plugged in or on a desktop. |
+
+They are independent by design: wanting "never download below 20% battery" has
+nothing to do with wanting "only download overnight".
+
+When the gate closes, running downloads stop **cooperatively** — each worker
+finishes its current chunk, flushes the partial file, and unwinds. Bytes on disk are
+kept, and the transfer resumes from the exact offset when the gate reopens. Downloads
+the *user* paused are never auto-resumed by the scheduler.
 
 ---
 
@@ -72,18 +91,26 @@ $bmp128.Save("src-tauri\icons\128x128@2x.png", [System.Drawing.Imaging.ImageForm
 FluxDM/
 ├── src-tauri/                  # Rust backend
 │   └── src/
-│       ├── engine/             # Download engine (parallel, queue, merge)
-│       ├── storage/            # SQLite via rusqlite
-│       ├── ai/                 # Categorizer, threat scorer, renamer
-│       ├── bridge/             # Browser extension IPC (Phase 3)
+│       ├── engine/
+│       │   ├── control.rs      # cooperative pause/cancel signals
+│       │   ├── downloader.rs   # segmented HTTP orchestrator
+│       │   ├── segment.rs      # byte-range worker with resume
+│       │   ├── resume.rs       # reconciles DB segments with temp files on disk
+│       │   ├── queue.rs        # concurrency + scheduler gate
+│       │   ├── scheduler.rs    # time / CPU / battery guards
+│       │   ├── torrent.rs      # BitTorrent session (librqbit)
+│       │   ├── hls.rs dash.rs stream.rs
+│       │   └── merger.rs
+│       ├── storage/            # SQLite via rusqlite (+ column migrations)
+│       ├── ai/                 # categorizer, threat scorer, renamer, LLM
+│       ├── bridge/ server/     # browser-extension IPC
 │       └── commands.rs         # Tauri command handlers
 ├── src/                        # React frontend
-│   ├── components/             # UI components
+│   ├── components/             # Sidebar, Toolbar, DownloadTable, DetailPanel…
 │   ├── store/                  # Zustand state
-│   ├── hooks/                  # useTauriEvents
-│   └── types/                  # TypeScript types
+│   └── types/                  # shared TypeScript types
 ├── extension/                  # Chrome/Firefox extension
-└── scripts/                    # install-extension.sh/.ps1
+└── scripts/                    # extension install helpers
 ```
 
 ---
@@ -92,19 +119,21 @@ FluxDM/
 
 | Decision | Choice | Why |
 |---|---|---|
-| Framework | Tauri 2 | 10MB binary vs 150MB Electron |
+| Framework | Tauri 2 | ~10 MB binary vs ~150 MB Electron |
 | Engine | Rust (tokio + reqwest) | Native async I/O, memory safe |
+| Torrents | librqbit | Pure-Rust, no native BitTorrent dependency |
 | Database | SQLite (bundled) | Zero config, local-first |
 | Parallelism | tokio multi-task | Segment tasks run truly in parallel |
-| State | Zustand (not Redux) | Simpler, less boilerplate |
-| Styling | Tailwind + shadcn/ui | Fast, dark mode built-in |
+| Stopping work | Cooperative polling | Aborting a task would strand temp files and DB rows |
+| State | Zustand | Simpler than Redux, less boilerplate |
+| Styling | Tailwind | Fast, dark mode built in |
 
 ---
 
 ## Browser Extension Setup
 
 ```powershell
-# Windows — after loading extension in Chrome:
+# Windows — after loading the extension in Chrome:
 .\scripts\install-extension.ps1 -ExtensionId YOUR_CHROME_EXT_ID
 
 # macOS / Linux:
@@ -114,14 +143,12 @@ chmod +x scripts/install-extension.sh
 
 ---
 
-## Build Phases
+## Tests
 
-- **Phase 1** ✅ — Core engine, queue, storage, AI layer, UI scaffold
-- **Phase 2** — Full React UI (all components wired to Rust commands)
-- **Phase 3** — Browser extension + native host
-- **Phase 4** — AI enhancements (better categorization, renamer v2)
-- **Phase 5** — HLS/DASH stream downloader
-- **Phase 6** — System tray, notifications, local LLM (Phi-3)
+```powershell
+cargo test --lib     # 34 unit tests
+npx tsc --noEmit     # frontend type check
+```
 
 ---
 

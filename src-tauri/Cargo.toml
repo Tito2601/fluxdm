@@ -24,6 +24,7 @@ tauri-build = { version = "2", features = [] }
 tauri              = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
 
 # HTTP server — browser extension fallback and IPC for native host
 axum        = { version = "0.7", default-features = false, features = ["tokio", "http1", "json", "macros"] }
@@ -61,6 +62,13 @@ bytes    = "1"
 tempfile = "3"
 regex    = "1"
 chrono   = { version = "0.4", features = ["serde"] }
+
+# BitTorrent engine
+librqbit = "8.1"
+
+# Scheduler resource gating: CPU load + battery level
+sysinfo          = { version = "0.39.6", default-features = false, features = ["system"] }
+starship-battery = "0.11.1"
 
 [profile.dev]
 opt-level = 1          # Faster builds in dev

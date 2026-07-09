@@ -52,6 +52,29 @@ const config: Config = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        // Layered surfaces, darkest (chrome) to lightest (hover / selected).
+        surface: {
+          0: "#080b11",
+          1: "#0d1219",
+          2: "#141b25",
+          3: "#1c2532",
+          4: "#26313f",
+        },
+        line: {
+          DEFAULT: "#1f2836",
+          strong: "#2c3849",
+        },
+        // Semantic accents. `up` marks upload/seeding so it never reads as download.
+        accent: {
+          DEFAULT: "#4c8dff",
+          dim: "#2c5fb3",
+          soft: "#8fb8ff",
+        },
+        up: "#f59e0b",
+        ok: "#22c55e",
+        warn: "#eab308",
+        danger: "#ef4444",
+
         flux: {
           blue: "#2563eb",
           purple: "#7c3aed",
@@ -77,11 +100,24 @@ const config: Config = {
           "0%, 100%": { opacity: "1" },
           "50%": { opacity: "0.5" },
         },
+        // Moving hatch overlaid on an in-progress bar, so motion signals activity
+        // even when the percentage barely changes.
+        "progress-stripes": {
+          from: { backgroundPosition: "0 0" },
+          to: { backgroundPosition: "28px 0" },
+        },
+        // Sweep used when total size is unknown (magnet metadata, chunked HTTP).
+        indeterminate: {
+          from: { transform: "translateX(-100%)" },
+          to: { transform: "translateX(400%)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
         "pulse-download": "pulse-download 1.5s ease-in-out infinite",
+        "progress-stripes": "progress-stripes 0.7s linear infinite",
+        indeterminate: "indeterminate 1.4s ease-in-out infinite",
       },
     },
   },

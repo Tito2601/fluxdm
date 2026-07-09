@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import {
   FolderOpen,
   Clock,
+  Magnet,
   ShieldCheck,
   Palette,
   Trash2,
@@ -23,6 +24,11 @@ export default function SettingsPanel() {
   const [enableScheduler, setEnableScheduler] = useState(settings.enableScheduler);
   const [schedulerStart, setSchedulerStart] = useState(settings.schedulerStart);
   const [schedulerStop, setSchedulerStop] = useState(settings.schedulerStop);
+  const [pauseOnCpu, setPauseOnCpu] = useState(settings.schedulerPauseOnHighCpu);
+  const [cpuThreshold, setCpuThreshold] = useState(settings.schedulerCpuThreshold);
+  const [pauseOnBattery, setPauseOnBattery] = useState(settings.schedulerPauseOnLowBattery);
+  const [batteryThreshold, setBatteryThreshold] = useState(settings.schedulerBatteryThreshold);
+  const [torrentSavePath, setTorrentSavePath] = useState(settings.torrentSavePath);
   const [zeroLog, setZeroLog] = useState(settings.zeroLogMode);
   const [theme, setTheme] = useState(settings.theme);
   const [saved, setSaved] = useState(false);
@@ -41,6 +47,11 @@ export default function SettingsPanel() {
     setEnableScheduler(settings.enableScheduler);
     setSchedulerStart(settings.schedulerStart);
     setSchedulerStop(settings.schedulerStop);
+    setPauseOnCpu(settings.schedulerPauseOnHighCpu);
+    setCpuThreshold(settings.schedulerCpuThreshold);
+    setPauseOnBattery(settings.schedulerPauseOnLowBattery);
+    setBatteryThreshold(settings.schedulerBatteryThreshold);
+    setTorrentSavePath(settings.torrentSavePath);
     setZeroLog(settings.zeroLogMode);
     setTheme(settings.theme);
     setLlmEnabled(settings.llmEnabled);
@@ -56,6 +67,11 @@ export default function SettingsPanel() {
     await updateSetting("enable_scheduler", String(enableScheduler));
     await updateSetting("scheduler_start", schedulerStart);
     await updateSetting("scheduler_stop", schedulerStop);
+    await updateSetting("scheduler_pause_on_high_cpu", String(pauseOnCpu));
+    await updateSetting("scheduler_cpu_threshold", String(cpuThreshold));
+    await updateSetting("scheduler_pause_on_low_battery", String(pauseOnBattery));
+    await updateSetting("scheduler_battery_threshold", String(batteryThreshold));
+    await updateSetting("torrent_save_path", torrentSavePath);
     await updateSetting("zero_log_mode", String(zeroLog));
     await updateSetting("theme", theme);
     await updateSetting("llm_enabled", String(llmEnabled));
@@ -157,8 +173,8 @@ export default function SettingsPanel() {
       <Section title="Scheduler" icon={<Clock size={15} />}>
         <div className="space-y-4">
           <Toggle
-            label="Enable Smart Scheduler"
-            description="Only download during specified time window"
+            label="Restrict to a time window"
+            description="Only download between the start and stop times. A window ending before it starts runs overnight."
             checked={enableScheduler}
             onChange={setEnableScheduler}
           />
@@ -184,26 +200,66 @@ export default function SettingsPanel() {
             </div>
           )}
 
-          <div className="space-y-2">
-            <p className="text-xs text-slate-500 font-medium">Conditions</p>
-            {[
-              "Only on unmetered connections",
-              "Pause when CPU > 80%",
-              "Pause when battery < 20%",
-            ].map((condition) => (
-              <label
-                key={condition}
-                className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer"
-              >
-                <input
-                  type="checkbox"
-                  className="accent-blue-500"
-                  disabled={!enableScheduler}
-                />
-                {condition}
-              </label>
-            ))}
-          </div>
+          {/* Each guard stands alone — you can throttle on battery without
+              committing to a download window. */}
+          <Toggle
+            label="Pause while the CPU is busy"
+            description={`Hold downloads when CPU load is above ${cpuThreshold}%`}
+            checked={pauseOnCpu}
+            onChange={setPauseOnCpu}
+          />
+          {pauseOnCpu && (
+            <FormRow label={`CPU threshold — ${cpuThreshold}%`}>
+              <input
+                type="range"
+                min={10}
+                max={100}
+                step={5}
+                value={cpuThreshold}
+                onChange={(e) => setCpuThreshold(Number(e.target.value))}
+                className="w-full accent-blue-500"
+              />
+            </FormRow>
+          )}
+
+          <Toggle
+            label="Pause on low battery"
+            description={`Hold downloads below ${batteryThreshold}% charge. Ignored while plugged in or on a desktop.`}
+            checked={pauseOnBattery}
+            onChange={setPauseOnBattery}
+          />
+          {pauseOnBattery && (
+            <FormRow label={`Battery threshold — ${batteryThreshold}%`}>
+              <input
+                type="range"
+                min={5}
+                max={90}
+                step={5}
+                value={batteryThreshold}
+                onChange={(e) => setBatteryThreshold(Number(e.target.value))}
+                className="w-full accent-blue-500"
+              />
+            </FormRow>
+          )}
+        </div>
+      </Section>
+
+      {/* Torrent Section */}
+      <Section title="Torrents" icon={<Magnet size={15} />}>
+        <div className="space-y-4">
+          <FormRow label="Torrent save folder">
+            <input
+              type="text"
+              value={torrentSavePath}
+              onChange={(e) => setTorrentSavePath(e.target.value)}
+              placeholder="~/Downloads"
+              className="w-full bg-[#0f172a] border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+            />
+          </FormRow>
+          <p className="text-xs text-slate-500">
+            Completed torrents keep seeding to the swarm until you remove them.
+            Changing this folder takes effect after a restart.
+          </p>
         </div>
       </Section>
 

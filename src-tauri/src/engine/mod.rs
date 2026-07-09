@@ -1,9 +1,14 @@
+pub mod control;
 pub mod dash;
 pub mod downloader;
 pub mod hls;
+pub mod http;
 pub mod merger;
 pub mod queue;
+pub mod rate;
 pub mod resume;
 pub mod scheduler;
 pub mod segment;
 pub mod stream;
+pub mod throttle;
+pub mod torrent;

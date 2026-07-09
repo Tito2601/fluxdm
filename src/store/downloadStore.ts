@@ -4,6 +4,7 @@ import {
   Download,
   DownloadRequest,
   ProgressEvent,
+  SchedulerState,
   Settings,
   StreamInfo,
   ThreatAnalysis,
@@ -17,6 +18,8 @@ interface DownloadState {
   error: string | null;
   /** Set when the browser extension requests a download; cleared once the dialog opens. */
   pendingDownload: DownloadRequest | null;
+  /** Null until the scheduler first reports in. */
+  scheduler: SchedulerState | null;
 
   // Actions
   loadDownloads: () => Promise<void>;
@@ -35,6 +38,11 @@ interface DownloadState {
   addDownloadFromEvent: (raw: Record<string, unknown>) => void;
   markCompleted: (id: string) => void;
   markFailed: (id: string, error: string) => void;
+  markPaused: (id: string) => void;
+  markCancelled: (id: string) => void;
+  setScheduler: (state: SchedulerState) => void;
+  isTorrentSource: (source: string) => Promise<boolean>;
+  addTorrent: (source: string, savePath: string) => Promise<string>;
   loadSettings: () => Promise<void>;
   updateSetting: (key: string, value: string) => Promise<void>;
   clearHistory: () => Promise<void>;
@@ -58,30 +66,50 @@ const DEFAULT_SETTINGS: Settings = {
   maxSegmentsPerDownload: 8,
   defaultSavePath: "~/Downloads",
   speedLimitKbps: 0,
+  zeroLogMode: false,
+  theme: "system",
   enableScheduler: false,
   schedulerStart: "02:00",
   schedulerStop: "07:00",
-  zeroLogMode: false,
-  theme: "system",
+  schedulerPauseOnHighCpu: false,
+  schedulerCpuThreshold: 80,
+  schedulerPauseOnLowBattery: false,
+  schedulerBatteryThreshold: 20,
+  torrentSavePath: "~/Downloads",
   llmEnabled: false,
   llmEndpoint: "http://localhost:11434/api/generate",
   llmModel: "llama3.2:1b",
 };
 
+/** Parse an integer setting, falling back when the stored value is unusable. */
+function num(raw: Record<string, string>, key: string, fallback: number): number {
+  const parsed = parseInt(raw[key] ?? "", 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function parseSettings(raw: Record<string, string>): Settings {
+  const d = DEFAULT_SETTINGS;
   return {
-    maxParallelDownloads: parseInt(raw["max_parallel_downloads"] ?? "3"),
-    maxSegmentsPerDownload: parseInt(raw["max_segments_per_download"] ?? "8"),
-    defaultSavePath: raw["default_save_path"] ?? "~/Downloads",
-    speedLimitKbps: parseInt(raw["speed_limit_kbps"] ?? "0"),
-    enableScheduler: raw["enable_scheduler"] === "true",
-    schedulerStart: raw["scheduler_start"] ?? "02:00",
-    schedulerStop: raw["scheduler_stop"] ?? "07:00",
+    maxParallelDownloads: num(raw, "max_parallel_downloads", d.maxParallelDownloads),
+    maxSegmentsPerDownload: num(raw, "max_segments_per_download", d.maxSegmentsPerDownload),
+    defaultSavePath: raw["default_save_path"] ?? d.defaultSavePath,
+    speedLimitKbps: num(raw, "speed_limit_kbps", d.speedLimitKbps),
     zeroLogMode: raw["zero_log_mode"] === "true",
-    theme: (raw["theme"] as Settings["theme"]) ?? "system",
+    theme: (raw["theme"] as Settings["theme"]) ?? d.theme,
+
+    enableScheduler: raw["enable_scheduler"] === "true",
+    schedulerStart: raw["scheduler_start"] ?? d.schedulerStart,
+    schedulerStop: raw["scheduler_stop"] ?? d.schedulerStop,
+    schedulerPauseOnHighCpu: raw["scheduler_pause_on_high_cpu"] === "true",
+    schedulerCpuThreshold: num(raw, "scheduler_cpu_threshold", d.schedulerCpuThreshold),
+    schedulerPauseOnLowBattery: raw["scheduler_pause_on_low_battery"] === "true",
+    schedulerBatteryThreshold: num(raw, "scheduler_battery_threshold", d.schedulerBatteryThreshold),
+
+    torrentSavePath: raw["torrent_save_path"] ?? d.torrentSavePath,
+
     llmEnabled: raw["llm_enabled"] === "true",
-    llmEndpoint: raw["llm_endpoint"] ?? "http://localhost:11434/api/generate",
-    llmModel: raw["llm_model"] ?? "llama3.2:1b",
+    llmEndpoint: raw["llm_endpoint"] ?? d.llmEndpoint,
+    llmModel: raw["llm_model"] ?? d.llmModel,
   };
 }
 
@@ -91,6 +119,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
   isLoading: false,
   error: null,
   pendingDownload: null,
+  scheduler: null,
 
   loadDownloads: async () => {
     set({ isLoading: true, error: null });
@@ -129,10 +158,31 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
         numSegments: 8,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        kind: "http",
+        uploadedBytes: 0,
+        uploadSpeedBps: 0,
+        peersConnected: 0,
+        peersTotal: 0,
       };
 
       set((state) => ({ downloads: [newDownload, ...state.downloads] }));
       return id;
+    } catch (err) {
+      set({ error: String(err) });
+      throw err;
+    }
+  },
+
+  isTorrentSource: async (source: string): Promise<boolean> => {
+    return invoke<boolean>("cmd_is_torrent_source", { source });
+  },
+
+  // The row is added by the `download_added` event the backend emits once swarm
+  // metadata arrives, so there is nothing to insert optimistically here — until
+  // then we don't know the torrent's name or size.
+  addTorrent: async (source: string, savePath: string): Promise<string> => {
+    try {
+      return await invoke<string>("cmd_add_torrent", { source, savePath });
     } catch (err) {
       set({ error: String(err) });
       throw err;
@@ -200,20 +250,49 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
 
   updateProgress: (event: ProgressEvent) => {
     set((state) => ({
+      downloads: state.downloads.map((d) => {
+        if (d.id !== event.id) return d;
+
+        // Progress ticks report bytes, not intent. A seeding torrent and a paused
+        // one both keep emitting, so only a download that was already running (or
+        // waiting to run) may be moved into "downloading" — anything the user or
+        // the scheduler stopped keeps the status it was given.
+        const running = d.status === "downloading" || d.status === "queued";
+        const status = running ? ("downloading" as const) : d.status;
+
+        return {
+          ...d,
+          downloaded: event.downloadedBytes,
+          totalBytes: event.totalBytes,
+          speedBps: event.speedBps,
+          etaSeconds: event.etaSeconds,
+          status,
+          uploadedBytes: event.uploadedBytes ?? d.uploadedBytes,
+          uploadSpeedBps: event.uploadSpeedBps ?? d.uploadSpeedBps,
+          peersConnected: event.peersConnected ?? d.peersConnected,
+          peersTotal: event.peersTotal ?? d.peersTotal,
+        };
+      }),
+    }));
+  },
+
+  markPaused: (id: string) => {
+    set((state) => ({
       downloads: state.downloads.map((d) =>
-        d.id === event.id
-          ? {
-              ...d,
-              downloaded: event.downloadedBytes,
-              totalBytes: event.totalBytes,
-              speedBps: event.speedBps,
-              etaSeconds: event.etaSeconds,
-              status: "downloading" as const,
-            }
-          : d
+        d.id === id ? { ...d, status: "paused" as const, speedBps: 0, etaSeconds: 0 } : d
       ),
     }));
   },
+
+  markCancelled: (id: string) => {
+    set((state) => ({
+      downloads: state.downloads.map((d) =>
+        d.id === id ? { ...d, status: "cancelled" as const, speedBps: 0, etaSeconds: 0 } : d
+      ),
+    }));
+  },
+
+  setScheduler: (scheduler: SchedulerState) => set({ scheduler }),
 
   markCompleted: (id: string) => {
     set((state) => ({

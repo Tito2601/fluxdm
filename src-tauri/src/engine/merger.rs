@@ -1,79 +1,47 @@
+//! Finalising a completed download.
+//!
+//! There is no merge step: segments write straight into their slices of the
+//! `.fluxdm-part` file, so finishing a download is a checksum and a rename rather
+//! than a second full copy of every byte.
+
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::io::{Seek, SeekFrom, Write};
+use std::path::Path;
 use tokio::io::AsyncReadExt;
-use tracing::{debug, info};
+use tracing::info;
 
-use crate::engine::segment::Segment;
-
-/// Merge all completed segments into the final output file.
+/// Verify the assembled part file, then move it into place under its real name.
 ///
-/// Segments are written at their exact byte offsets so they can arrive in any order.
-/// After merging, temp files are deleted and the SHA-256 checksum is returned.
-pub async fn merge_segments(mut segments: Vec<Segment>, output_path: &str) -> Result<String> {
-    // Sort by index to write in order (more cache-friendly for sequential reads)
-    segments.sort_by_key(|s| s.index_num);
+/// Returns the SHA-256 of the finished file.
+pub async fn finalize_download(part: &Path, output_path: &str, expected_len: u64) -> Result<String> {
+    let actual = tokio::fs::metadata(part)
+        .await
+        .with_context(|| format!("Part file missing: {}", part.display()))?
+        .len();
 
-    info!(
-        "Merging {} segments into '{}'",
-        segments.len(),
-        output_path
-    );
-
-    // Pre-allocate output file to the expected total size
-    let total_size = segments
-        .last()
-        .map(|s| s.byte_end + 1)
-        .unwrap_or(0);
-
-    let mut output = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(output_path)
-        .with_context(|| format!("Cannot create output file: {}", output_path))?;
-
-    if total_size > 0 {
-        output
-            .set_len(total_size)
-            .context("Failed to pre-allocate output file")?;
+    // Every segment reported success, so a size mismatch means the pieces did not
+    // cover the file. Better to fail loudly than to rename a file with a hole.
+    if expected_len > 0 && actual != expected_len {
+        return Err(anyhow::anyhow!(
+            "Assembled file is {} bytes, expected {}",
+            actual,
+            expected_len
+        ));
     }
 
-    // Write each segment at its correct byte offset
-    for segment in &segments {
-        let temp_path = match &segment.temp_file_path {
-            Some(p) => p.clone(),
-            None => {
-                return Err(anyhow::anyhow!(
-                    "Segment {} has no temp file path",
-                    segment.index_num
-                ))
-            }
-        };
-
-        let data = std::fs::read(&temp_path).with_context(|| {
-            format!("Failed to read segment temp file: {}", temp_path)
-        })?;
-
-        output.seek(SeekFrom::Start(segment.byte_start))?;
-        output.write_all(&data)?;
-
-        debug!(
-            "Written segment {} ({} bytes at offset {})",
-            segment.index_num,
-            data.len(),
-            segment.byte_start
-        );
-
-        // Clean up temp file
-        let _ = std::fs::remove_file(&temp_path);
-    }
-
-    output.flush()?;
-    drop(output);
-
-    info!("All segments merged. Calculating checksum...");
-    let checksum = calculate_sha256(output_path).await?;
+    info!("Download assembled. Calculating checksum...");
+    let checksum = calculate_sha256(&part.to_string_lossy()).await?;
     info!("SHA-256: {}", checksum);
+
+    // `rename` refuses to clobber an existing file on Windows.
+    if Path::new(output_path).exists() {
+        tokio::fs::remove_file(output_path)
+            .await
+            .with_context(|| format!("Cannot replace existing file: {}", output_path))?;
+    }
+    tokio::fs::rename(part, output_path)
+        .await
+        .with_context(|| format!("Cannot move {} into place", part.display()))?;
 
     Ok(checksum)
 }
@@ -97,4 +65,62 @@ pub async fn calculate_sha256(file_path: &str) -> Result<String> {
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("fluxdm-merge-{}-{}", name, uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn moves_the_part_file_into_place_and_hashes_it() {
+        let part = scratch("part");
+        let out = scratch("out");
+        std::fs::write(&part, b"hello").unwrap();
+
+        let sum = finalize_download(&part, &out.to_string_lossy(), 5).await.unwrap();
+
+        assert!(!part.exists(), "part file must be gone");
+        assert_eq!(std::fs::read(&out).unwrap(), b"hello");
+        // Known SHA-256 of "hello".
+        assert_eq!(sum, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+
+        let _ = std::fs::remove_file(out);
+    }
+
+    /// A short part file means the segments left a hole. Renaming it would hand
+    /// the user a corrupt file that looks complete.
+    #[tokio::test]
+    async fn refuses_to_publish_a_file_of_the_wrong_size() {
+        let part = scratch("short");
+        let out = scratch("short-out");
+        std::fs::write(&part, b"hi").unwrap();
+
+        let err = finalize_download(&part, &out.to_string_lossy(), 99)
+            .await
+            .expect_err("must reject a size mismatch");
+
+        assert!(err.to_string().contains("expected 99"), "got: {}", err);
+        assert!(!out.exists(), "nothing may be published");
+        let _ = std::fs::remove_file(part);
+    }
+
+    /// Re-downloading over an existing file must replace it; `rename` alone would
+    /// fail on Windows.
+    #[tokio::test]
+    async fn replaces_an_existing_output_file() {
+        let part = scratch("replace");
+        let out = scratch("replace-out");
+        std::fs::write(&part, b"new").unwrap();
+        std::fs::write(&out, b"stale").unwrap();
+
+        finalize_download(&part, &out.to_string_lossy(), 3).await.unwrap();
+
+        assert_eq!(std::fs::read(&out).unwrap(), b"new");
+        let _ = std::fs::remove_file(out);
+    }
 }

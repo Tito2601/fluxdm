@@ -10,6 +10,9 @@ export type DownloadStatus =
   | "failed"
   | "cancelled";
 
+/** Which engine owns a download. */
+export type DownloadKind = "http" | "stream" | "torrent";
+
 export interface Download {
   id: string;
   url: string;
@@ -30,6 +33,16 @@ export interface Download {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+
+  // Torrent-only; zero / undefined for other kinds.
+  kind: DownloadKind;
+  infoHash?: string;
+  uploadedBytes: number;
+  uploadSpeedBps: number;
+  /** Peers currently connected. */
+  peersConnected: number;
+  /** Distinct peers discovered in the swarm. */
+  peersTotal: number;
 }
 
 export interface ProgressEvent {
@@ -38,6 +51,31 @@ export interface ProgressEvent {
   totalBytes: number;
   speedBps: number;
   etaSeconds: number;
+
+  // Present only for torrents.
+  uploadedBytes?: number;
+  uploadSpeedBps?: number;
+  peersConnected?: number;
+  peersTotal?: number;
+}
+
+/** Emitted when the scheduler opens or closes the download gate. */
+export interface SchedulerState {
+  open: boolean;
+  /** Why downloading is on hold. Null when the gate is open. */
+  reason: string | null;
+}
+
+export interface TorrentFile {
+  name: string;
+  length: number;
+}
+
+export interface TorrentAdded {
+  name: string;
+  totalBytes: number;
+  infoHash: string;
+  files: TorrentFile[];
 }
 
 export interface CompleteEvent {
@@ -69,12 +107,22 @@ export interface Settings {
   maxSegmentsPerDownload: number;
   defaultSavePath: string;
   speedLimitKbps: number;
+  zeroLogMode: boolean;
+  theme: "light" | "dark" | "system";
+
+  // Scheduler — each guard is independent of the others.
   enableScheduler: boolean;
   schedulerStart: string;
   schedulerStop: string;
-  zeroLogMode: boolean;
-  theme: "light" | "dark" | "system";
-  // LLM settings (Phase 6)
+  schedulerPauseOnHighCpu: boolean;
+  schedulerCpuThreshold: number;
+  schedulerPauseOnLowBattery: boolean;
+  schedulerBatteryThreshold: number;
+
+  // Torrent
+  torrentSavePath: string;
+
+  // LLM settings
   llmEnabled: boolean;
   llmEndpoint: string;
   llmModel: string;
@@ -199,6 +247,23 @@ export function formatEta(seconds: number): string {
   return `${h}h ${m}m`;
 }
 
+/** Percentage complete, 0-100. Zero-size downloads read as 0 rather than NaN. */
+export function progressPercent(d: Download): number {
+  if (!d.totalBytes) return d.status === "completed" ? 100 : 0;
+  return Math.min(100, (d.downloaded / d.totalBytes) * 100);
+}
+
+/** Share ratio for a torrent — uploaded over downloaded. */
+export function shareRatio(d: Download): number {
+  if (!d.downloaded) return 0;
+  return d.uploadedBytes / d.downloaded;
+}
+
+/** A download is doing work right now (and so should animate). */
+export function isActive(d: Download): boolean {
+  return d.status === "downloading" || d.status === "queued";
+}
+
 // Utility: convert raw Rust DownloadJob to Download type
 export function normalizeDownload(raw: Record<string, unknown>): Download {
   return {
@@ -221,5 +286,12 @@ export function normalizeDownload(raw: Record<string, unknown>): Download {
     createdAt: raw.created_at as string,
     updatedAt: raw.updated_at as string,
     completedAt: raw.completed_at as string | undefined,
+
+    kind: (raw.kind as DownloadKind) ?? "http",
+    infoHash: raw.info_hash as string | undefined,
+    uploadedBytes: (raw.uploaded_bytes as number) ?? 0,
+    uploadSpeedBps: (raw.upload_speed_bps as number) ?? 0,
+    peersConnected: (raw.peers_connected as number) ?? 0,
+    peersTotal: (raw.peers_total as number) ?? 0,
   };
 }

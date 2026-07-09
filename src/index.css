@@ -61,21 +61,42 @@
 
 /* Custom scrollbar for dark theme */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: hsl(var(--background));
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: hsl(var(--muted));
-  border-radius: 3px;
+  background: #2c3849;
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--muted-foreground));
+  background: #3d4b5e;
+}
+
+/* Diagonal hatch for an actively downloading progress bar. Pairs with the
+   `animate-progress-stripes` keyframes to convey motion. */
+.progress-stripes {
+  background-image: linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.14) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.14) 50%,
+    rgba(255, 255, 255, 0.14) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 28px 28px;
+}
+
+/* Tabular figures keep speed/size columns from jittering as digits change. */
+.tnum {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Prevent text selection on UI elements */
