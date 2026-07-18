@@ -356,6 +356,54 @@ pub async fn cmd_llm_suggest_name(
 
 /// Does this look like a magnet link or a `.torrent` file?
 /// Lets the Add dialog switch modes before the user commits.
+// ── Site grabber ──────────────────────────────────────────────────────────────
+
+/// Crawl a page and return the downloadable files it links to.
+///
+/// Discovery only — nothing is enqueued. The caller picks from the results,
+/// because a crawl routinely surfaces far more than the user wants.
+#[tauri::command]
+pub async fn cmd_crawl_site(
+    options: crate::engine::crawler::CrawlOptions,
+) -> Result<crate::engine::crawler::CrawlResult, String> {
+    info!("cmd_crawl_site: url={} depth={}", options.url, options.depth);
+    crate::engine::crawler::crawl(options)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Enqueue a batch of URLs discovered by the crawler.
+///
+/// Returns the new job IDs. A failure on one URL does not abort the rest: a
+/// batch of fifty is not worth discarding because one link went stale.
+#[tauri::command]
+pub async fn cmd_add_downloads(
+    urls:      Vec<String>,
+    save_path: String,
+    db:        Db<'_>,
+    queue:     Queue<'_>,
+) -> Result<Vec<String>, String> {
+    info!("cmd_add_downloads: {} url(s)", urls.len());
+
+    let mut ids = Vec::with_capacity(urls.len());
+
+    for url in urls {
+        let filename   = url.split('/').next_back().unwrap_or("download");
+        let clean_name = crate::ai::renamer::smart_rename(&url, filename, "");
+        let job = DownloadJob::new(url.clone(), clean_name, save_path.clone(), None, None);
+
+        if let Err(e) = db.lock().await.upsert_download(&job) {
+            error!("DB error queueing '{}': {}", url, e);
+            continue;
+        }
+
+        ids.push(job.id.clone());
+        queue.enqueue(job).await;
+    }
+
+    Ok(ids)
+}
+
 // ── Auto-shutdown ─────────────────────────────────────────────────────────────
 
 /// Abort an in-flight auto-shutdown countdown.

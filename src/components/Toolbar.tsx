@@ -1,5 +1,6 @@
 import {
   FolderOpen,
+  Globe,
   Magnet,
   Pause,
   Play,
@@ -25,6 +26,7 @@ interface Props {
   onQueryChange: (q: string) => void;
   onAddUrl: () => void;
   onAddTorrent: () => void;
+  onGrabSite: () => void;
   onResume: () => void;
   onPause: () => void;
   onStop: () => void;
@@ -39,6 +41,7 @@ export default function Toolbar({
   onQueryChange,
   onAddUrl,
   onAddTorrent,
+  onGrabSite,
   onResume,
   onPause,
   onStop,
@@ -61,6 +64,7 @@ export default function Toolbar({
       {/* Adding a download is always available; it is what the app is for. */}
       <ToolButton label="Add URL" Icon={Plus} onClick={onAddUrl} primary />
       <ToolButton label="Add Torrent" Icon={Magnet} onClick={onAddTorrent} />
+      <ToolButton label="Grab Site" Icon={Globe} onClick={onGrabSite} />
 
       {/* The rest of the toolbar acts on the selected row, so it is meaningless
           away from the table rather than merely disabled. */}

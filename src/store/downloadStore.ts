@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  CrawlOptions,
+  CrawlResult,
   Download,
   DownloadRequest,
   ProgressEvent,
@@ -45,6 +47,8 @@ interface DownloadState {
   setScheduler: (state: SchedulerState) => void;
   setShutdownCountdown: (seconds: number | null) => void;
   cancelShutdown: () => Promise<void>;
+  crawlSite: (options: CrawlOptions) => Promise<CrawlResult>;
+  addDownloads: (urls: string[], savePath: string) => Promise<string[]>;
   isTorrentSource: (source: string) => Promise<boolean>;
   addTorrent: (source: string, savePath: string) => Promise<string>;
   loadSettings: () => Promise<void>;
@@ -310,6 +314,29 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     // next backend tick.
     set({ shutdownCountdown: null });
     await invoke("cmd_cancel_shutdown");
+  },
+
+  crawlSite: async (options: CrawlOptions): Promise<CrawlResult> => {
+    try {
+      return await invoke<CrawlResult>("cmd_crawl_site", { options });
+    } catch (err) {
+      set({ error: String(err) });
+      throw err;
+    }
+  },
+
+  addDownloads: async (urls: string[], savePath: string): Promise<string[]> => {
+    try {
+      const ids = await invoke<string[]>("cmd_add_downloads", {
+        urls,
+        savePath: savePath || get().settings.defaultSavePath,
+      });
+      await get().loadDownloads();
+      return ids;
+    } catch (err) {
+      set({ error: String(err) });
+      throw err;
+    }
   },
 
   markCompleted: (id: string) => {

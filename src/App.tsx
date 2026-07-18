@@ -10,6 +10,7 @@ import AnalyticsDashboard from "./components/AnalyticsDashboard";
 import DetailPanel from "./components/DetailPanel";
 import DownloadTable from "./components/DownloadTable";
 import SettingsPanel from "./components/SettingsPanel";
+import SiteGrabber from "./components/SiteGrabber";
 import Sidebar, { Filter, matchesFilter } from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import Toolbar, { Pane } from "./components/Toolbar";
@@ -21,6 +22,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [detailsCollapsed, setDetailsCollapsed] = useState(false);
   const [addMode, setAddMode] = useState<AddMode | null>(null);
+  const [grabbing, setGrabbing] = useState(false);
 
   const {
     downloads,
@@ -98,6 +100,7 @@ function App() {
         onQueryChange={setQuery}
         onAddUrl={() => setAddMode("url")}
         onAddTorrent={() => setAddMode("torrent")}
+        onGrabSite={() => setGrabbing(true)}
         onResume={() => selected && resumeDownload(selected.id)}
         onPause={() => selected && pauseDownload(selected.id)}
         onStop={() => selected && cancelDownload(selected.id)}
@@ -185,6 +188,8 @@ function App() {
           onClose={closeDialog}
         />
       )}
+
+      {grabbing && <SiteGrabber onClose={() => setGrabbing(false)} />}
     </div>
   );
 }

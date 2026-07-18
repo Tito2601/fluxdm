@@ -165,6 +165,32 @@ export interface DownloadRequest {
   cookies?:     string;
 }
 
+// ── Site grabber ───────────────────────────────────────────────────────────────
+
+export interface CrawlOptions {
+  url: string;
+  /** Link levels to follow. 0 = the starting page only. */
+  depth: number;
+  sameHostOnly: boolean;
+  /** Extensions without dots. Empty = every known downloadable type. */
+  extensions: string[];
+}
+
+export interface DiscoveredFile {
+  url:       string;
+  filename:  string;
+  extension: string;
+  label:     string | null;
+  source:    string;
+}
+
+export interface CrawlResult {
+  files:        DiscoveredFile[];
+  pagesVisited: number;
+  /** True when a cap cut the crawl short, so results are not exhaustive. */
+  truncated:    boolean;
+}
+
 // ── Stream types ───────────────────────────────────────────────────────────────
 
 export interface StreamQuality {

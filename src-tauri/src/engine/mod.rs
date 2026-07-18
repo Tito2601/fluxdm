@@ -1,4 +1,5 @@
 pub mod control;
+pub mod crawler;
 pub mod dash;
 pub mod downloader;
 pub mod hls;

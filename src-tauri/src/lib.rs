@@ -189,6 +189,8 @@ pub fn run() {
             commands::cmd_is_torrent_source,
             commands::cmd_add_torrent,
             commands::cmd_cancel_shutdown,
+            commands::cmd_crawl_site,
+            commands::cmd_add_downloads,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FluxDM");
