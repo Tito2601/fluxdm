@@ -20,6 +20,8 @@ interface DownloadState {
   pendingDownload: DownloadRequest | null;
   /** Null until the scheduler first reports in. */
   scheduler: SchedulerState | null;
+  /** Seconds left before auto-shutdown; null when no countdown is running. */
+  shutdownCountdown: number | null;
 
   // Actions
   loadDownloads: () => Promise<void>;
@@ -41,6 +43,8 @@ interface DownloadState {
   markPaused: (id: string) => void;
   markCancelled: (id: string) => void;
   setScheduler: (state: SchedulerState) => void;
+  setShutdownCountdown: (seconds: number | null) => void;
+  cancelShutdown: () => Promise<void>;
   isTorrentSource: (source: string) => Promise<boolean>;
   addTorrent: (source: string, savePath: string) => Promise<string>;
   loadSettings: () => Promise<void>;
@@ -75,6 +79,7 @@ const DEFAULT_SETTINGS: Settings = {
   schedulerCpuThreshold: 80,
   schedulerPauseOnLowBattery: false,
   schedulerBatteryThreshold: 20,
+  autoShutdown: false,
   torrentSavePath: "~/Downloads",
   llmEnabled: false,
   llmEndpoint: "http://localhost:11434/api/generate",
@@ -105,6 +110,9 @@ function parseSettings(raw: Record<string, string>): Settings {
     schedulerPauseOnLowBattery: raw["scheduler_pause_on_low_battery"] === "true",
     schedulerBatteryThreshold: num(raw, "scheduler_battery_threshold", d.schedulerBatteryThreshold),
 
+    // Absent must read as false: a missing key can never mean "power off".
+    autoShutdown: raw["auto_shutdown"] === "true",
+
     torrentSavePath: raw["torrent_save_path"] ?? d.torrentSavePath,
 
     llmEnabled: raw["llm_enabled"] === "true",
@@ -120,6 +128,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
   error: null,
   pendingDownload: null,
   scheduler: null,
+  shutdownCountdown: null,
 
   loadDownloads: async () => {
     set({ isLoading: true, error: null });
@@ -293,6 +302,15 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
   },
 
   setScheduler: (scheduler: SchedulerState) => set({ scheduler }),
+
+  setShutdownCountdown: (shutdownCountdown: number | null) => set({ shutdownCountdown }),
+
+  cancelShutdown: async () => {
+    // Clear locally first so the banner disappears on click rather than on the
+    // next backend tick.
+    set({ shutdownCountdown: null });
+    await invoke("cmd_cancel_shutdown");
+  },
 
   markCompleted: (id: string) => {
     set((state) => ({

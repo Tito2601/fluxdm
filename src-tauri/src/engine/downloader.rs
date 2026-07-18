@@ -296,11 +296,13 @@ pub async fn start_download(
     // ── Step 1: HEAD request ──────────────────────────────────────────────
     // A metadata probe should not hang the queue, so it keeps a hard deadline
     // even though the shared client sets none for body transfers.
-    let head = client
-        .head(&job.url)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await?;
+    let head = http::apply_captured(
+        client.head(&job.url).timeout(std::time::Duration::from_secs(30)),
+        job.headers.as_ref(),
+        job.cookies.as_deref(),
+    )
+    .send()
+    .await?;
 
     let content_length = head
         .headers()
@@ -668,6 +670,7 @@ async fn multi_segment_download(
     let total_bytes      = job.total_bytes;
     let job_id           = job.id.clone();
     let url              = job.url.clone();
+    let headers          = job.headers.clone();
     let cookies          = job.cookies.clone();
 
     // Emit an initial progress event so the UI snaps to the correct position immediately.
@@ -698,6 +701,7 @@ async fn multi_segment_download(
         }
 
         let url         = url.clone();
+        let headers     = headers.clone();
         let cookies     = cookies.clone();
         let db          = db.clone();
         let control     = control.clone();
@@ -705,9 +709,16 @@ async fn multi_segment_download(
         let part        = part.clone();
 
         handles.push(tokio::spawn(async move {
-            let result =
-                download_segment(segment, &url, cookies.as_deref(), &control, &progress_tx, &part)
-                    .await;
+            let result = download_segment(
+                segment,
+                &url,
+                headers.as_ref(),
+                cookies.as_deref(),
+                &control,
+                &progress_tx,
+                &part,
+            )
+            .await;
 
             match &result {
                 Ok(seg) => {
@@ -798,11 +809,13 @@ async fn single_stream_download(
 ) -> Result<DownloadOutcome> {
     info!("Server does not support range requests — single stream download");
 
-    let response = client
-        .get(&job.url)
-        .header("User-Agent", "FluxDM/0.1")
-        .send()
-        .await?;
+    let response = http::apply_captured(
+        client.get(&job.url),
+        job.headers.as_ref(),
+        job.cookies.as_deref(),
+    )
+    .send()
+    .await?;
 
     // Checked before the file is created: an error response still carries a body,
     // and writing it would leave the error page sitting on disk under the real

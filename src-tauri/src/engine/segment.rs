@@ -117,6 +117,7 @@ impl Segment {
 pub async fn download_segment(
     mut segment: Segment,
     url: &str,
+    headers: Option<&serde_json::Value>,
     cookies: Option<&str>,
     control: &DownloadControl,
     progress: &ProgressTx,
@@ -160,14 +161,10 @@ pub async fn download_segment(
             );
         }
 
-        let mut req = client
-            .get(url)
-            .header(RANGE, &range_header)
-            .header("User-Agent", "FluxDM/0.1");
-
-        if let Some(cookie) = cookies {
-            req = req.header("Cookie", cookie);
-        }
+        // RANGE is set last on purpose: this slice's bounds must win over anything
+        // the browser happened to have captured, regardless of what was recorded.
+        let req = http::apply_captured(client.get(url), headers, cookies)
+            .header(RANGE, &range_header);
 
         match req.send().await {
             Ok(response) => {
@@ -410,7 +407,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let segment = Segment::new("job", 0, 0, BODY as u64 - 1);
-        let seg = download_segment(segment, &url, None, &control, &tx, &dest)
+        let seg = download_segment(segment, &url, None, None, &control, &tx, &dest)
             .await
             .expect("segment must download");
         drop(tx);
@@ -461,7 +458,7 @@ mod tests {
             let tx = tx.clone();
             tasks.push(tokio::spawn(async move {
                 let seg = Segment::new("job", i, start, end);
-                download_segment(seg, &url, None, &control, &tx, &dest).await
+                download_segment(seg, &url, None, None, &control, &tx, &dest).await
             }));
         }
 
@@ -495,7 +492,7 @@ mod tests {
         let dest = dest_file(BODY as u64);
         throttle::set_limit_kbps(0);
         let start = std::time::Instant::now();
-        download_segment(Segment::new("job", 0, 0, BODY as u64 - 1), &url, None, &control, &tx, &dest)
+        download_segment(Segment::new("job", 0, 0, BODY as u64 - 1), &url, None, None, &control, &tx, &dest)
             .await
             .expect("baseline segment must download");
         let unlimited = start.elapsed();
@@ -507,7 +504,7 @@ mod tests {
         let start = std::time::Instant::now();
         let seg = download_segment(
             Segment::new("job", 0, 0, BODY as u64 - 1),
-            &url, None, &control, &tx, &dest,
+            &url, None, None, &control, &tx, &dest,
         )
         .await
         .expect("throttled segment must download");
@@ -551,7 +548,7 @@ mod tests {
         let mut segment = Segment::new("job", 0, 0, BODY as u64 - 1);
         segment.downloaded = half;
 
-        let seg = download_segment(segment, &url, None, &control, &tx, &dest)
+        let seg = download_segment(segment, &url, None, None, &control, &tx, &dest)
             .await
             .expect("segment must resume");
 
@@ -560,6 +557,44 @@ mod tests {
 
         let written = std::fs::read(&dest).unwrap();
         assert!(written == *expected, "resumed file differs from the source");
+
+        let _ = std::fs::remove_file(dest);
+    }
+
+    /// Captured browser headers must never redirect a segment's byte range.
+    ///
+    /// The test server honours whatever `Range` it is sent, so a leaked capture
+    /// shows up directly as the wrong bytes landing at the wrong offset — the
+    /// exact way a forwarded header would silently corrupt a download.
+    #[tokio::test]
+    async fn captured_range_header_cannot_override_the_segment() {
+        let expected = body();
+        let url      = serve(expected.clone()).await;
+        let dest     = dest_file(BODY as u64);
+        let control  = DownloadControl::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // A stale capture pointing at a completely different part of the file.
+        let captured = serde_json::json!({
+            "Range":   "bytes=0-9",
+            "Referer": "https://example.test/page",
+        });
+
+        let segment = Segment::new("job", 0, 0, BODY as u64 - 1);
+        let seg = download_segment(
+            segment, &url, Some(&captured), None, &control, &tx, &dest,
+        )
+        .await
+        .expect("segment must download");
+
+        assert_eq!(seg.status, SegmentStatus::Completed);
+        assert_eq!(
+            seg.downloaded, BODY as u64,
+            "captured Range leaked and truncated the segment"
+        );
+
+        let written = std::fs::read(&dest).unwrap();
+        assert!(written == *expected, "captured Range corrupted the output");
 
         let _ = std::fs::remove_file(dest);
     }

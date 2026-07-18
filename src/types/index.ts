@@ -119,6 +119,9 @@ export interface Settings {
   schedulerPauseOnLowBattery: boolean;
   schedulerBatteryThreshold: number;
 
+  /** Power off the machine once the queue drains. Off by default. */
+  autoShutdown: boolean;
+
   // Torrent
   torrentSavePath: string;
 
@@ -156,6 +159,10 @@ export interface DownloadRequest {
   threatScore?: number;
   category?:    string;
   fileSize?:    number;
+  /** Request headers the extension captured for this URL. */
+  headers?:     Record<string, string>;
+  /** Cookie header for this URL's origin. */
+  cookies?:     string;
 }
 
 // ── Stream types ───────────────────────────────────────────────────────────────

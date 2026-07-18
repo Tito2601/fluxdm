@@ -47,11 +47,11 @@ struct AddPayload {
     url:          String,
     filename:     Option<String>,
     save_path:    Option<String>,
-    /// Reserved for future per-request header injection; not yet processed.
-    #[allow(dead_code)]
+    /// Request headers the extension observed for this URL. Forwarded to the
+    /// transfer so a session-scoped or hotlink-guarded origin sees the same
+    /// request it accepted in the browser.
     headers:      Option<serde_json::Value>,
-    /// Reserved for future cookie forwarding; not yet processed.
-    #[allow(dead_code)]
+    /// Cookie header assembled by the extension for this URL's origin.
     cookies:      Option<String>,
     referrer:     Option<String>,
     page_url:     Option<String>,
@@ -148,6 +148,9 @@ async fn add_handler(
     // We do NOT create a DB entry or enqueue here.
     // The user confirms the save location in the Add Download dialog,
     // then the normal cmd_add_download command does the actual work.
+    // Headers and cookies ride along so the dialog can hand them to
+    // cmd_add_download. Without them the transfer arrives at the origin as an
+    // anonymous request and a session-gated URL that worked in the browser 404s.
     let _ = state.app_handle.emit("download_requested", serde_json::json!({
         "url":         payload.url,
         "filename":    filename,
@@ -158,6 +161,8 @@ async fn add_handler(
         "threatScore": threat_score,
         "category":    category,
         "fileSize":    payload.file_size,
+        "headers":     payload.headers,
+        "cookies":     payload.cookies,
     }));
 
     Ok(Json(serde_json::json!({

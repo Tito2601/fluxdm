@@ -264,11 +264,13 @@ async fn download_hls(
     let client = http::client();
 
     // Fetch the media playlist
-    let response = client
-        .get(&job.url)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await?;
+    let response = http::apply_captured(
+        client.get(&job.url).timeout(std::time::Duration::from_secs(60)),
+        job.headers.as_ref(),
+        job.cookies.as_deref(),
+    )
+    .send()
+    .await?;
     let content  = response.text().await?;
 
     let segments = match hls::parse_m3u8(&content, &job.url).map_err(|e| anyhow::anyhow!(e))? {
@@ -296,7 +298,15 @@ async fn download_hls(
     let start_time      = std::time::Instant::now();
 
     for (i, seg) in segments.iter().enumerate() {
-        let mut resp = client.get(&seg.url).send().await?;
+        // Media segments are usually served under the same session grant as the
+        // playlist, so they need the captured credentials too.
+        let mut resp = http::apply_captured(
+            client.get(&seg.url),
+            job.headers.as_ref(),
+            job.cookies.as_deref(),
+        )
+        .send()
+        .await?;
 
         while let Some(chunk) = resp.chunk().await? {
             throttle::consume(chunk.len() as u64).await;
@@ -334,11 +344,13 @@ async fn download_dash(
     let client = http::client();
 
     // Fetch the MPD manifest
-    let response = client
-        .get(&job.url)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await?;
+    let response = http::apply_captured(
+        client.get(&job.url).timeout(std::time::Duration::from_secs(60)),
+        job.headers.as_ref(),
+        job.cookies.as_deref(),
+    )
+    .send()
+    .await?;
     let content  = response.text().await?;
     let streams  = dash::parse_mpd(&content, &job.url).map_err(|e| anyhow::anyhow!(e))?;
 
@@ -371,7 +383,13 @@ async fn download_dash(
 
     // Download initialization segment first
     if let Some(url) = &init_url {
-        let mut resp = client.get(url).send().await?;
+        let mut resp = http::apply_captured(
+            client.get(url),
+            job.headers.as_ref(),
+            job.cookies.as_deref(),
+        )
+        .send()
+        .await?;
         while let Some(chunk) = resp.chunk().await? {
             throttle::consume(chunk.len() as u64).await;
             out.write_all(&chunk).await?;
@@ -382,7 +400,13 @@ async fn download_dash(
 
     // Download media segments
     for url in &seg_urls {
-        let resp = client.get(url).send().await?;
+        let resp = http::apply_captured(
+            client.get(url),
+            job.headers.as_ref(),
+            job.cookies.as_deref(),
+        )
+        .send()
+        .await?;
 
         // A 404 signals end of stream for live-to-VOD manifests with open-ended count
         if resp.status() == reqwest::StatusCode::NOT_FOUND {

@@ -3,14 +3,17 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, Loader2, Magnet, Radio, Sparkles, X } from "lucide-react";
 import StreamPicker from "./StreamPicker";
 import { useDownloadStore } from "../store/downloadStore";
-import { StreamInfo, StreamQuality } from "../types";
+import { DownloadRequest, StreamInfo, StreamQuality } from "../types";
 
 export type AddMode = "url" | "torrent";
 
 interface Props {
   mode: AddMode;
-  /** Prefills from the browser extension, if any. */
-  initial?: { url: string; filename: string; savePath: string };
+  /**
+   * Prefills from the browser extension, if any. Typed as the full request so
+   * the captured headers and cookies survive the trip to the backend.
+   */
+  initial?: Partial<DownloadRequest> & Pick<DownloadRequest, "url" | "filename" | "savePath">;
   onClose: () => void;
 }
 
@@ -108,7 +111,18 @@ export default function AddDialog({ mode, initial, onClose }: Props) {
         await addTorrent(source.trim(), savePath || defaultPath);
       } else {
         const name = filename || source.split("/").pop() || "download";
-        await addDownload(source.trim(), name, savePath || defaultPath);
+        // Only meaningful when the extension opened this dialog: replaying its
+        // captured headers is what lets a session-gated URL download here.
+        // Dropped if the user edited the URL, since the capture no longer
+        // describes the request being made.
+        const sameUrl = source.trim() === initial?.url;
+        await addDownload(
+          source.trim(),
+          name,
+          savePath || defaultPath,
+          sameUrl ? initial?.headers : undefined,
+          sameUrl ? initial?.cookies : undefined
+        );
       }
       onClose();
     } catch (err) {

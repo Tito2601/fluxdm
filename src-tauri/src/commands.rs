@@ -13,6 +13,7 @@ use crate::storage::db::{AnalyticsData, Database};
 type Db<'a> = State<'a, Arc<Mutex<Database>>>;
 type Queue<'a> = State<'a, Arc<DownloadQueue>>;
 type Torrent<'a> = State<'a, Arc<TorrentEngine>>;
+type Shutdown<'a> = State<'a, Arc<crate::engine::shutdown::ShutdownControl>>;
 
 // ── Add a new download ────────────────────────────────────────────────────────
 
@@ -355,6 +356,21 @@ pub async fn cmd_llm_suggest_name(
 
 /// Does this look like a magnet link or a `.torrent` file?
 /// Lets the Add dialog switch modes before the user commits.
+// ── Auto-shutdown ─────────────────────────────────────────────────────────────
+
+/// Abort an in-flight auto-shutdown countdown.
+///
+/// Safe to call when no countdown is running: the flag is reset before each one
+/// starts, so a stray cancel cannot disable the next shutdown.
+#[tauri::command]
+pub async fn cmd_cancel_shutdown(shutdown: Shutdown<'_>) -> Result<(), String> {
+    info!("cmd_cancel_shutdown: user aborted shutdown countdown");
+    shutdown.cancel();
+    Ok(())
+}
+
+// ── Torrents ──────────────────────────────────────────────────────────────────
+
 #[tauri::command]
 pub async fn cmd_is_torrent_source(source: String) -> Result<bool, String> {
     Ok(crate::engine::torrent::is_torrent_source(&source))

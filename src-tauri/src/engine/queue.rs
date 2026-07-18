@@ -85,6 +85,15 @@ impl DownloadQueue {
         self.active.lock().await.len()
     }
 
+    /// Nothing running and nothing waiting to run.
+    ///
+    /// Both halves matter: a job between "dequeued" and "marked active" would
+    /// otherwise read as idle for a tick, and anything watching for the queue to
+    /// drain would fire in the middle of a working session.
+    pub async fn is_idle(&self) -> bool {
+        self.active.lock().await.is_empty() && self.queue.lock().await.is_empty()
+    }
+
     /// IDs of the downloads currently transferring.
     pub async fn active_ids(&self) -> Vec<String> {
         self.active.lock().await.clone()

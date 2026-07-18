@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { AlertCircle, X, Zap } from "lucide-react";
+import { AlertCircle, Power, X, Zap } from "lucide-react";
 
 import { useTauriEvents } from "./hooks/useTauriEvents";
 import { useDownloadStore } from "./store/downloadStore";
@@ -35,6 +35,8 @@ function App() {
     deleteDownload,
     pendingDownload,
     setPendingDownload,
+    shutdownCountdown,
+    cancelShutdown,
   } = useDownloadStore();
 
   useTauriEvents();
@@ -109,6 +111,24 @@ function App() {
           <span className="flex-1">{error}</span>
           <button onClick={clearError} title="Dismiss" className="p-0.5 hover:text-white">
             <X size={13} />
+          </button>
+        </div>
+      )}
+
+      {/* Deliberately louder than the error banner and not dismissable by the
+          close button — the only way out is Cancel, which stops the shutdown. */}
+      {shutdownCountdown !== null && (
+        <div className="flex flex-shrink-0 items-center gap-2.5 border-b border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          <Power size={13} className="flex-shrink-0" />
+          <span className="flex-1">
+            Downloads finished — shutting down in{" "}
+            <strong className="tabular-nums">{shutdownCountdown}s</strong>
+          </span>
+          <button
+            onClick={cancelShutdown}
+            className="rounded border border-amber-400/50 px-2 py-0.5 font-medium hover:bg-amber-400/20"
+          >
+            Cancel
           </button>
         </div>
       )}

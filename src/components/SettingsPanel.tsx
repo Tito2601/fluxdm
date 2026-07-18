@@ -28,6 +28,7 @@ export default function SettingsPanel() {
   const [cpuThreshold, setCpuThreshold] = useState(settings.schedulerCpuThreshold);
   const [pauseOnBattery, setPauseOnBattery] = useState(settings.schedulerPauseOnLowBattery);
   const [batteryThreshold, setBatteryThreshold] = useState(settings.schedulerBatteryThreshold);
+  const [autoShutdown, setAutoShutdown] = useState(settings.autoShutdown);
   const [torrentSavePath, setTorrentSavePath] = useState(settings.torrentSavePath);
   const [zeroLog, setZeroLog] = useState(settings.zeroLogMode);
   const [theme, setTheme] = useState(settings.theme);
@@ -51,6 +52,7 @@ export default function SettingsPanel() {
     setCpuThreshold(settings.schedulerCpuThreshold);
     setPauseOnBattery(settings.schedulerPauseOnLowBattery);
     setBatteryThreshold(settings.schedulerBatteryThreshold);
+    setAutoShutdown(settings.autoShutdown);
     setTorrentSavePath(settings.torrentSavePath);
     setZeroLog(settings.zeroLogMode);
     setTheme(settings.theme);
@@ -71,6 +73,7 @@ export default function SettingsPanel() {
     await updateSetting("scheduler_cpu_threshold", String(cpuThreshold));
     await updateSetting("scheduler_pause_on_low_battery", String(pauseOnBattery));
     await updateSetting("scheduler_battery_threshold", String(batteryThreshold));
+    await updateSetting("auto_shutdown", String(autoShutdown));
     await updateSetting("torrent_save_path", torrentSavePath);
     await updateSetting("zero_log_mode", String(zeroLog));
     await updateSetting("theme", theme);
@@ -240,6 +243,19 @@ export default function SettingsPanel() {
                 className="w-full accent-blue-500"
               />
             </FormRow>
+          )}
+
+          <Toggle
+            label="Shut down when downloads finish"
+            description="Powers off this machine once the queue empties. A 60-second countdown appears first, and any new download cancels it."
+            checked={autoShutdown}
+            onChange={setAutoShutdown}
+          />
+          {autoShutdown && (
+            <p className="text-xs text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+              Your PC will power off after the queue drains. Unsaved work in other
+              apps may be lost.
+            </p>
           )}
         </div>
       </Section>

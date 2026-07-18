@@ -9,6 +9,7 @@ pub mod rate;
 pub mod resume;
 pub mod scheduler;
 pub mod segment;
+pub mod shutdown;
 pub mod stream;
 pub mod throttle;
 pub mod torrent;

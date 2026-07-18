@@ -38,6 +38,7 @@ export function useTauriEvents() {
     markCancelled,
     setScheduler,
     setPendingDownload,
+    setShutdownCountdown,
   } = useDownloadStore();
 
   useEffect(() => {
@@ -46,6 +47,16 @@ export function useTauriEvents() {
     // Browser extension sent a URL → show the save dialog instead of auto-downloading.
     listen<DownloadRequest>("download_requested", (event) => {
       setPendingDownload(event.payload);
+    }).then((fn) => unlisten.push(fn));
+
+    // Auto-shutdown countdown — one tick per second while it runs.
+    listen<{ secondsRemaining: number }>("shutdown_pending", (event) => {
+      setShutdownCountdown(event.payload.secondsRemaining);
+    }).then((fn) => unlisten.push(fn));
+
+    // Cancelled, or aborted because new work arrived.
+    listen("shutdown_cancelled", () => {
+      setShutdownCountdown(null);
     }).then((fn) => unlisten.push(fn));
 
     // cmd_add_stream_download emits this so the download row appears immediately.

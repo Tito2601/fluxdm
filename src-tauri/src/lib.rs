@@ -13,6 +13,7 @@ mod tray;
 pub mod utils;
 
 use engine::queue::DownloadQueue;
+use engine::shutdown::ShutdownControl;
 use engine::torrent::TorrentEngine;
 use storage::db::Database;
 
@@ -20,6 +21,7 @@ use storage::db::Database;
 pub type DbState = Arc<Mutex<Database>>;
 pub type QueueState = Arc<DownloadQueue>;
 pub type TorrentState = Arc<TorrentEngine>;
+pub type ShutdownState = Arc<ShutdownControl>;
 
 /// Concurrency fallback when `max_parallel_downloads` is missing or unparseable.
 const DEFAULT_MAX_PARALLEL: usize = 3;
@@ -84,6 +86,11 @@ pub fn run() {
             // set of stop signals.
             let control = queue.control();
 
+            // ── Auto-shutdown cancel flag ─────────────────────────────────
+            // Managed so the UI's cancel button can reach an in-flight countdown.
+            let shutdown_control: ShutdownState = Arc::new(ShutdownControl::new());
+            app.manage(shutdown_control.clone());
+
             // ── BitTorrent session ────────────────────────────────────────
             // Built synchronously: the Tauri commands need the managed state to
             // exist before the first window can invoke them.
@@ -118,6 +125,19 @@ pub fn run() {
                 let queue      = queue.clone();
                 tauri::async_runtime::spawn(async move {
                     engine::scheduler::run_scheduler(app_handle, db, queue).await;
+                });
+            }
+
+            // ── Auto-shutdown watcher ─────────────────────────────────────
+            // Inert unless the `auto_shutdown` setting is on, and even then only
+            // after it has seen the queue busy — see engine::shutdown.
+            {
+                let app_handle = app.handle().clone();
+                let db         = db.clone();
+                let queue      = queue.clone();
+                let shutdown   = shutdown_control.clone();
+                tauri::async_runtime::spawn(async move {
+                    engine::shutdown::run_auto_shutdown(app_handle, db, queue, shutdown).await;
                 });
             }
 
@@ -168,6 +188,7 @@ pub fn run() {
             commands::cmd_llm_suggest_name,
             commands::cmd_is_torrent_source,
             commands::cmd_add_torrent,
+            commands::cmd_cancel_shutdown,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FluxDM");
