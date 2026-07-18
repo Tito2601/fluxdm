@@ -90,6 +90,19 @@ export default function AddDialog({ mode, initial, onClose }: Props) {
     }
   };
 
+  // A manifest URL sent by the extension must not fall through to the plain HTTP
+  // path — that would save the playlist text under a video filename. Probing on
+  // arrival puts the quality picker up before the user can hit Download.
+  // Restricted to `initial` so typing a URL by hand still probes only on request.
+  useEffect(() => {
+    if (!initial?.url || torrentMode) return;
+    if (!/\.(m3u8|mpd)(\?|$)/i.test(initial.url)) return;
+    detectStream();
+    // Runs once per prefill: detectStream closes over state that it also sets,
+    // so depending on it would re-probe on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial?.url]);
+
   const suggest = async () => {
     if (!source) return;
     setSuggesting(true);

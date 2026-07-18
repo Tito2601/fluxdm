@@ -18,6 +18,25 @@ const STATUS_URL    = "http://127.0.0.1:54321/status";
 /** File extensions that should be captured automatically. */
 const CAPTURE_RE = /\.(zip|exe|dmg|mp4|mkv|avi|mov|pdf|iso|7z|rar|tar\.gz|tar\.bz2|msi|deb|rpm|apk|pkg|jar|bin|img|xz|zst|epub|mobi)(\?.*)?$/i;
 
+/** Streaming manifests: HLS playlists and DASH descriptions. */
+const MANIFEST_RE = /\.(m3u8|mpd)(\?|$)/i;
+
+/** Content types that identify a manifest when the URL carries no extension. */
+const MANIFEST_TYPES = [
+  "application/vnd.apple.mpegurl",
+  "application/x-mpegurl",
+  "audio/mpegurl",
+  "audio/x-mpegurl",
+  "application/dash+xml",
+];
+
+/**
+ * Individual media segments. Excluded deliberately: one playing video fetches
+ * hundreds of these, and none of them are independently downloadable — only the
+ * manifest that indexes them is.
+ */
+const SEGMENT_RE = /\.(ts|m4s|aac|m4a|mp4|cmf[vat])(\?|$)/i;
+
 /** Headers map: url → {header: value} — collected by webRequest listener. */
 const capturedHeaders = new Map();
 
@@ -128,6 +147,103 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ["requestHeaders"]
 );
 
+// ── 3b. Sniff HLS/DASH manifests ──────────────────────────────────────────────
+//
+// Streaming video is never a plain download: the page fetches a manifest that
+// indexes hundreds of short segments, so there is no single URL for the browser
+// download API to intercept. Watching request traffic for that manifest is what
+// makes "download this video" possible at all.
+//
+// State lives in chrome.storage.session rather than a module variable because an
+// MV3 service worker is evicted after ~30s idle — a Map would silently lose every
+// stream found before the user got around to clicking.
+
+/** Key for a tab's discovered streams. */
+const streamKey = (tabId) => `streams_${tabId}`;
+
+/** Cap per tab: a long session on a video site would otherwise grow forever. */
+const MAX_STREAMS_PER_TAB = 20;
+
+chrome.webRequest.onHeadersReceived.addListener(
+  (details) => {
+    if (details.tabId < 0) return; // Not attached to a tab (e.g. a worker fetch)
+
+    const type = manifestType(details);
+    if (!type) return;
+
+    recordStream(details.tabId, {
+      url:     details.url,
+      type,                       // "hls" | "dash"
+      headers: capturedHeaders.get(details.url) || {},
+      foundAt: Date.now(),
+    });
+  },
+  { urls: ["<all_urls>"] },
+  ["responseHeaders"]
+);
+
+/**
+ * Classify a response as an HLS or DASH manifest, or null if it is neither.
+ *
+ * Content-Type is checked before the URL because a signed or query-routed
+ * manifest often has no recognisable extension, and because some CDNs serve
+ * `.m3u8` paths that are really redirects.
+ */
+function manifestType(details) {
+  const header = (details.responseHeaders || []).find(
+    (h) => h.name.toLowerCase() === "content-type"
+  );
+  const mime = (header?.value || "").split(";")[0].trim().toLowerCase();
+
+  if (MANIFEST_TYPES.includes(mime)) {
+    return mime === "application/dash+xml" ? "dash" : "hls";
+  }
+
+  // Segments share their manifest's media types on some servers, so the segment
+  // check has to run before falling back to the URL.
+  if (SEGMENT_RE.test(details.url) && !MANIFEST_RE.test(details.url)) return null;
+
+  const m = details.url.match(MANIFEST_RE);
+  if (m) return m[1].toLowerCase() === "mpd" ? "dash" : "hls";
+
+  return null;
+}
+
+async function recordStream(tabId, stream) {
+  const key   = streamKey(tabId);
+  const store = await chrome.storage.session.get(key);
+  const found = store[key] || [];
+
+  // A player re-requests its manifest constantly (live edge, quality switches).
+  if (found.some((s) => s.url === stream.url)) return;
+
+  found.push(stream);
+  const trimmed = found.slice(-MAX_STREAMS_PER_TAB);
+  await chrome.storage.session.set({ [key]: trimmed });
+
+  chrome.action.setBadgeText({ tabId, text: String(trimmed.length) });
+  chrome.action.setBadgeBackgroundColor({ color: "#2563eb" });
+
+  // Tell the page to offer the panel. The tab may have no content script yet
+  // (or be a restricted page), so a failure here is expected and ignored.
+  chrome.tabs.sendMessage(tabId, {
+    type:  "fluxdm_stream_found",
+    count: trimmed.length,
+  }).catch(() => {});
+}
+
+// Discovered streams belong to the page that was loaded, so a navigation clears
+// them — otherwise the panel would offer a video the user has already left.
+chrome.webNavigation?.onCommitted.addListener((details) => {
+  if (details.frameId !== 0) return; // Ignore iframe navigation
+  chrome.storage.session.remove(streamKey(details.tabId));
+  chrome.action.setBadgeText({ tabId: details.tabId, text: "" });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  chrome.storage.session.remove(streamKey(tabId));
+});
+
 // ── 4. Clipboard monitor (via content script) ─────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -166,7 +282,60 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
     return true;
   }
+
+  // ── Streams found in a tab ────────────────────────────────────────────────
+  // The content script asks about its own tab; the popup has to name one.
+  if (message.type === "get_streams") {
+    const tabId = message.tabId ?? _sender.tab?.id;
+    if (tabId == null) {
+      sendResponse({ streams: [] });
+      return false;
+    }
+    chrome.storage.session.get(streamKey(tabId), (store) => {
+      sendResponse({ streams: store[streamKey(tabId)] || [] });
+    });
+    return true;
+  }
+
+  // ── Send a discovered stream to FluxDM ────────────────────────────────────
+  if (message.type === "download_stream") {
+    const { url, type, pageUrl, title } = message;
+
+    (async () => {
+      const stored = await chrome.storage.session.get(streamKey(_sender.tab?.id));
+      const record = (stored[streamKey(_sender.tab?.id)] || []).find((s) => s.url === url);
+
+      await sendToFluxDM({
+        url,
+        // The manifest's own name is meaningless ("index.m3u8"), so the page
+        // title is what makes the finished file identifiable.
+        filename:    streamFilename(title, type),
+        headers:     record?.headers || capturedHeaders.get(url) || {},
+        cookies:     await getCookieHeader(url),
+        referrer:    pageUrl || "",
+        pageUrl:     pageUrl || "",
+        contentType: type === "dash" ? "application/dash+xml" : "application/x-mpegurl",
+      });
+    })()
+      .then(()    => sendResponse({ ok: true }))
+      .catch((e)  => sendResponse({ ok: false, error: String(e) }));
+
+    return true;
+  }
 });
+
+/** Build a filesystem-safe name from the page title. */
+function streamFilename(title, type) {
+  const base = (title || "video")
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "")  // Illegal on Windows and awkward elsewhere
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120) || "video";
+
+  // HLS segments are MPEG-TS and DASH segments are fragmented MP4. Naming them
+  // accordingly keeps players from mis-detecting the container.
+  return `${base}.${type === "dash" ? "mp4" : "ts"}`;
+}
 
 // ── 5. Send to FluxDM ─────────────────────────────────────────────────────────
 

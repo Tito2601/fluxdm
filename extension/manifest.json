@@ -6,6 +6,7 @@
 
   "permissions": [
     "webRequest",
+    "webNavigation",
     "downloads",
     "tabs",
     "cookies",
