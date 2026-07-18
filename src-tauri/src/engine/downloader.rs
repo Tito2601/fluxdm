@@ -327,6 +327,21 @@ pub async fn start_download(
         content_length, supports_ranges, mime_type
     );
 
+    // A binary filename answered with a web page means the link never resolved to
+    // the file: expired signed URL, hotlink guard, or a login wall. The body would
+    // be an error page, so fail here rather than write it to disk under the
+    // expected filename.
+    if let Some(mime) = mime_type.as_deref() {
+        if is_markup(mime) && expects_binary(&job.filename) {
+            anyhow::bail!(
+                "server returned a web page ({}) instead of '{}' — the link may have \
+                 expired or require signing in",
+                mime,
+                job.filename
+            );
+        }
+    }
+
     job.total_bytes = content_length;
     job.mime_type   = mime_type.clone();
     job.status      = DownloadStatus::Downloading;
@@ -378,8 +393,10 @@ pub async fn start_download(
         Ok(DownloadOutcome::Finished(checksum)) => {
             job.status       = DownloadStatus::Completed;
             job.checksum     = Some(checksum.clone());
-            job.downloaded   = content_length;
             job.completed_at = Some(Utc::now().to_rfc3339());
+            // `job.downloaded` is left as the transfer set it. Assigning the
+            // advertised Content-Length here would paint a truncated file as a
+            // full one in the UI.
 
             let _ = app_handle.emit("download_complete", serde_json::json!({
                 "id":        job.id,
@@ -436,6 +453,34 @@ pub async fn start_download(
 /// Remove the partially written file for a cancelled download.
 fn discard_part_file(output_path: &str) {
     let _ = std::fs::remove_file(part_path(output_path));
+}
+
+/// Whether a MIME type denotes a rendered page rather than file content.
+fn is_markup(mime: &str) -> bool {
+    let mime = mime.trim().to_ascii_lowercase();
+    mime == "text/html" || mime == "application/xhtml+xml"
+}
+
+/// Whether a filename promises binary content.
+///
+/// Deliberately a whitelist of container/archive/media formats: an unknown or
+/// absent extension stays permissive, so only a confident mismatch — `.zip`
+/// answered with markup — is ever treated as an error.
+fn expects_binary(filename: &str) -> bool {
+    const BINARY_EXT: &[&str] = &[
+        "zip", "rar", "7z", "gz", "bz2", "xz", "tar", "iso", "img", "bin", "cue",
+        "exe", "msi", "dmg", "pkg", "deb", "rpm", "apk",
+        "mp4", "mkv", "avi", "mov", "webm", "mp3", "flac", "wav", "m4a",
+        "pdf", "epub", "jpg", "jpeg", "png", "gif", "webp",
+    ];
+
+    filename
+        .rsplit_once('.')
+        .map(|(_, ext)| {
+            let ext = ext.to_ascii_lowercase();
+            BINARY_EXT.contains(&ext.as_str())
+        })
+        .unwrap_or(false)
 }
 
 // ── Progress reporting ────────────────────────────────────────────────────────
@@ -759,6 +804,18 @@ async fn single_stream_download(
         .send()
         .await?;
 
+    // Checked before the file is created: an error response still carries a body,
+    // and writing it would leave the error page sitting on disk under the real
+    // filename.
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!(
+            "server rejected the request for '{}': HTTP {}",
+            job.filename,
+            status
+        );
+    }
+
     let mut file        = tokio::fs::File::create(output_path).await?;
     let mut stream      = response.bytes_stream();
     let mut downloaded  = 0u64;
@@ -801,9 +858,50 @@ async fn single_stream_download(
     }
 
     file.flush().await?;
+    drop(file);
     job.downloaded = downloaded;
+
+    // An empty body is never a real download. Discard it so a dead link cannot
+    // masquerade as a completed file.
+    if downloaded == 0 {
+        let _ = tokio::fs::remove_file(output_path).await;
+        anyhow::bail!(
+            "server sent no data for '{}' — the link may have expired",
+            job.filename
+        );
+    }
 
     calculate_sha256(output_path)
         .await
         .map(DownloadOutcome::Finished)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markup_types_are_recognized() {
+        assert!(is_markup("text/html"));
+        assert!(is_markup("TEXT/HTML"));
+        assert!(is_markup("application/xhtml+xml"));
+        assert!(!is_markup("application/zip"));
+        assert!(!is_markup("application/octet-stream"));
+    }
+
+    #[test]
+    fn binary_extensions_are_recognized() {
+        assert!(expects_binary("God of War II (USA).zip"));
+        assert!(expects_binary("disc.ISO"));
+        assert!(expects_binary("movie.mkv"));
+    }
+
+    #[test]
+    fn unknown_extensions_stay_permissive() {
+        // The guard only fires on a confident mismatch, so anything it cannot
+        // classify must fall through as non-binary.
+        assert!(!expects_binary("index.html"));
+        assert!(!expects_binary("README"));
+        assert!(!expects_binary("data.somethingnew"));
+    }
 }
